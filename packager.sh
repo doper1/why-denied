@@ -24,7 +24,7 @@ VERSION="$(tr -d ' \t\r\n' < version.txt 2>/dev/null || echo 0.1.0)"
 ARCH="${ARCH:-$(uname -m)}"
 MAINTAINER="${MAINTAINER:-why-denied contributors <noreply@example.com>}"
 DESCRIPTION="Human-readable root-cause analysis for Permission Denied (EACCES/EPERM) errors."
-URL="${URL:-https://github.com/why-denied/why-denied}"
+URL="${URL:-https://github.com/doper1/why-denied}"
 LICENSE="MIT"
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"

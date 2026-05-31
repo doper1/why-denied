@@ -4,7 +4,7 @@
 
 ### Stop guessing. Know *exactly* why your "Permission denied" happened
 
-[![Release](https://img.shields.io/github/v/release/why-denied/why-denied?include_prereleases&sort=semver)](https://github.com/why-denied/why-denied/releases)
+[![Release](https://img.shields.io/github/v/release/doper1/why-denied?include_prereleases&sort=semver)](https://github.com/doper1/why-denied/releases)
 [![Release Please](https://img.shields.io/badge/release-please-enabled-brightgreen)](https://github.com/googleapis/release-please)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: C](https://img.shields.io/badge/Language-C-555555.svg?logo=c)](src/why-denied.c)
@@ -205,7 +205,7 @@ covered.
 ### Manual install from source
 
 ```bash
-git clone https://github.com/why-denied/why-denied.git
+git clone https://github.com/doper1/why-denied.git
 cd why-denied
 make
 sudo make install        # -> /usr/lib/why-denied/why-denied.so + /etc/profile.d hook
