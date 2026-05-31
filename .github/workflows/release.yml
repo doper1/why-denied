@@ -75,20 +75,36 @@ jobs:
       - name: Install toolchain (RHEL/Rocky/Fedora)
         if: matrix.format == 'rpm'
         run: |
-          dnf install -y gcc make libacl-devel ruby ruby-devel rpm-build redhat-rpm-config tar
+          # The rockylinux:9 image ships a prebuilt dnf cache that can be stale
+          # relative to the live 9.x repos; that mismatch makes the modular
+          # `ruby` packages fail transaction check with "No available modular
+          # metadata for modular package". Refresh the metadata and pin a valid
+          # ruby module stream before installing so the modulemd is present.
+          dnf -y clean all
+          rm -rf /var/cache/dnf
+          dnf -y makecache
+          dnf -y install gcc make libacl-devel rpm-build redhat-rpm-config tar
+          dnf -y module reset ruby || true
+          dnf -y module enable ruby:3.3 || dnf -y module enable ruby:3.1 || true
+          dnf -y install ruby ruby-devel
           gem install --no-document fpm
 
       - name: Install toolchain (Alpine)
         if: matrix.format == 'apk'
         run: |
-          apk add --no-cache build-base acl-dev ruby ruby-dev libffi-dev tar
+          # `bash` is required because packager.sh is a bash script (arrays,
+          # mapfile); Alpine has no bash by default.
+          apk add --no-cache build-base acl-dev ruby ruby-dev libffi-dev tar bash
           gem install --no-document fpm
 
       - name: Build shared library
         run: make all
 
       - name: Build ${{ matrix.format }} package
-        run: ./packager.sh ${{ matrix.format }}
+        # Invoke via `bash` so packaging does not depend on the script's
+        # executable bit being preserved in the checkout (a missing +x bit was
+        # making `./packager.sh` fail with exit code 126, "Permission denied").
+        run: bash packager.sh ${{ matrix.format }}
 
       - name: Upload package to release
         uses: softprops/action-gh-release@v2
