@@ -155,7 +155,8 @@ static void resolve_sym(void **slot, const char *name)
  *
  * NOTE: this is NOT async-signal-safe — vsnprintf() is not on the AS-safe list.
  * That is fine: we only run from normal application context after a failed libc
- * call (never from a signal handler) and behind the per-thread reentrancy guard.
+ * call (never from a signal handler) and behind the per-thread reentrancy
+ * guard.
  * ---------------------------------------------------------------------- */
 static void emitf(const char *fmt, ...)
 {
@@ -266,7 +267,8 @@ static char class_char(int cls)
 
 /* A /proc/self/fd readlink result is only a usable path if it is absolute and
  * not a synthetic name (pipe:[...], socket:[...], anon_inode:..., or a
- * "<path> (deleted)" tombstone). Returns 1 if the link looks like a real path. */
+ * "<path> (deleted)" tombstone). Returns 1 if the link looks like a real path.
+ */
 static int is_real_path_link(const char *link, size_t len)
 {
     if (len == 0 || link[0] != '/')
@@ -749,8 +751,7 @@ static void analyze_denial(const char *path, enum access_kind kind)
              * lacks search permission. */
             if (!report_missing_search(path))
                 advanced_triage(path);
-        } else if ((kind == AK_WRITE || kind == AK_RDWR) &&
-                   errno == ENOENT) {
+        } else if ((kind == AK_WRITE || kind == AK_RDWR) && errno == ENOENT) {
             /* open(O_CREAT) on a missing file fails in the parent directory. */
             parent_of(path, parent, sizeof parent);
             if (!check_parent_writable(parent))
