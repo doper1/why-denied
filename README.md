@@ -4,8 +4,6 @@
 
 ### Stop guessing. Know *exactly* why your "Permission denied" happened.
 
-[![CI](https://github.com/why-denied/why-denied/actions/workflows/ci.yml/badge.svg)](https://github.com/why-denied/why-denied/actions/workflows/ci.yml)
-[![Security](https://github.com/why-denied/why-denied/actions/workflows/security.yml/badge.svg)](https://github.com/why-denied/why-denied/actions/workflows/security.yml)
 [![Release](https://img.shields.io/github/v/release/why-denied/why-denied?include_prereleases&sort=semver)](https://github.com/why-denied/why-denied/releases)
 [![Release Please](https://img.shields.io/badge/release-please-enabled-brightgreen)](https://github.com/googleapis/release-please)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
