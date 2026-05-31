@@ -1,4 +1,8 @@
-# why-denied test image — Rocky Linux 9 (glibc, RPM family).
+# why-denied test image — Fedora 40 (glibc, RPM family).
+#
+# Fedora is the upstream/leading-edge Red Hat family member (dnf, .rpm). Unlike
+# the RHEL/UBI image it DOES ship `libacl-devel`, so it builds the default
+# libacl-backed variant — complementing rhel (xattr fallback) and rocky.
 #
 # Source is mounted at runtime (read-only) at /src; the entrypoint copies it
 # into the writable, tester-owned /work tree so the build + test run as an
@@ -6,20 +10,26 @@
 #
 # TEST IMAGE ONLY — grants the `tester` user passwordless root via sudo so the
 # behavioural suite can forge foreign ownership. Do NOT use as a production base.
-#
-# Uses the maintained Quay image (the Docker Hub `rockylinux:9` is deprecated
-# and ships a stale dnf cache); release.yml builds the .rpm against the same.
-FROM quay.io/rockylinux/rockylinux:9
+FROM fedora:40
 
-RUN dnf -y install \
+# shadow-utils -> useradd; util-linux -> `script` (pty driver); python3 -> pty
+# fallback; libacl-devel -> ACL headers; acl -> setfacl/getfacl. bash is in base.
+#
+# Single cached RUN: install only what the build/test needs (no system upgrade),
+# disable weak deps to keep the image small/fast, then drop the dnf cache so it
+# does not bloat the layer.
+RUN dnf -y --setopt=install_weak_deps=False install \
         gcc \
         make \
         libacl-devel \
         acl \
         util-linux \
+        python3 \
+        shadow-utils \
         sudo \
         diffutils \
-    && dnf clean all
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
 
 # Unprivileged test user with passwordless sudo (permission tests are only
 # meaningful when the prober is NOT root).

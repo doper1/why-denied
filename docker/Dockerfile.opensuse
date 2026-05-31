@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1
+# why-denied test image — openSUSE Leap 15 (glibc, RPM family).
+#
+# openSUSE uses zypper and the .rpm format but is an independent RPM family from
+# Red Hat; it ships `libacl-devel`, so it builds the default libacl-backed
+# variant. Adds zypper/.rpm coverage distinct from the dnf-based rocky/rhel/fedora
+# images.
+#
+# Source is mounted at runtime (read-only) at /src; the entrypoint copies it
+# into the writable, tester-owned /work tree so the build + test run as an
+# unprivileged user regardless of the host bind-mount's ownership.
+#
+# TEST IMAGE ONLY — grants the `tester` user passwordless root via sudo so the
+# behavioural suite can forge foreign ownership. Do NOT use as a production base.
+FROM opensuse/leap:15
+
+# shadow -> useradd; util-linux -> `script` (pty driver); python3 -> pty
+# fallback; libacl-devel -> ACL headers; acl -> setfacl/getfacl. bash is in base.
+#
+# BUILD SPEED: the stock Leap image wires up several repos (update, non-oss,
+# and a Cisco openh264 repo). Refreshing all of them — especially the openh264
+# repo's GPG key import — is the slowest part of a cold build and is irrelevant
+# to our toolchain, which lives entirely in the OSS repo. So we disable every
+# repo, enable ONLY repo-oss, refresh just that one, and install with
+# --no-recommends, all in a single cached layer. (A test image does not need
+# the update channel; rebuild from a newer base to pick up patches.)
+#
+# The BuildKit cache mount on /var/cache/zypp persists the downloaded repo
+# metadata and .rpm packages across builds WITHOUT baking them into the image
+# layer — so a rebuild (or a cache-invalidated CI run) reuses the refreshed
+# metadata + cached rpms instead of re-fetching them, while the image stays
+# small. Because the cache mount lives outside the layer, the old trailing
+# `zypper clean --all` is intentionally dropped: cleaning would only purge the
+# out-of-layer cache and defeat the speedup, and it never affected layer size
+# here anyway.
+RUN --mount=type=cache,target=/var/cache/zypp,sharing=locked \
+    set -eux; \
+    zypper --non-interactive modifyrepo --all --disable; \
+    zypper --non-interactive modifyrepo --enable repo-oss; \
+    zypper --non-interactive --gpg-auto-import-keys refresh repo-oss; \
+    zypper --non-interactive install --no-recommends \
+        gcc \
+        make \
+        libacl-devel \
+        acl \
+        util-linux \
+        python3 \
+        shadow \
+        sudo \
+        diffutils
+
+# Unprivileged test user with passwordless sudo (permission tests are only
+# meaningful when the prober is NOT root).
+RUN useradd -m tester \
+    && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester \
+    && chmod 0440 /etc/sudoers.d/tester \
+    && mkdir -p /work \
+    && chown tester:tester /work
+
+USER tester
+WORKDIR /work
+
+CMD ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]

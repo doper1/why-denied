@@ -11,14 +11,15 @@ on:
         description: "Existing release tag to build packages for (e.g. v0.1.0)"
         required: true
 
+# Least privilege by default: the workflow can only READ contents. Each job
+# opts into the narrower set of write scopes it actually needs (see below).
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   # ------------------------------------------------------------------------
   # release-please maintains an ongoing "Release PR". Merging it tags a new
-  # release and sets release_created=true, which gates the packaging job.
+  # release and sets release_created=true, which gates the packaging jobs.
   #
   # Configuration lives in release-please-config.json and
   # .release-please-manifest.json (manifest mode is the v4 default; the
@@ -28,23 +29,34 @@ jobs:
     name: Release PR / tag
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Only this job creates the Release PR / tag, so it is the only one that
+    # needs write access to contents + pull-requests.
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
-        uses: googleapis/release-please-action@v4
+        # Pinned to the v4.4.0 commit SHA (immutable). The trailing comment
+        # tracks the human-readable version for Dependabot updates.
+        uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
 
   # ------------------------------------------------------------------------
-  # Build native packages on each target distro using its own container, then
-  # upload them to the GitHub Release. Runs when release-please cut a release,
-  # or when manually dispatched against an existing tag.
+  # Build the glibc .deb (debian:12) and .rpm (rockylinux:9) packages inside
+  # their own distro containers. These are glibc bases, so GitHub's bundled
+  # Node20 runtime can run the JS actions (checkout, upload-artifact) inside
+  # the container. Each leg only UPLOADS an artifact — publishing to the
+  # release happens later from the non-container `publish` job.
   # ------------------------------------------------------------------------
-  packages:
-    name: Package (${{ matrix.name }})
+  build-glibc:
+    name: Build (${{ matrix.name }})
     needs: release-please
     if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -53,17 +65,17 @@ jobs:
             image: debian:12
             format: deb
           - name: rockylinux
-            image: rockylinux:9
+            # Match docker/Dockerfile.rocky: the Docker Hub `rockylinux:9`
+            # image is deprecated and ships a stale dnf cache; the Quay image
+            # is the maintained source and needs no makecache workaround.
+            image: quay.io/rockylinux/rockylinux:9
             format: rpm
-          - name: alpine
-            image: alpine:3.20
-            format: apk
     container:
       image: ${{ matrix.image }}
-    env:
-      TAG: ${{ github.event.inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Install toolchain (Debian/Ubuntu)
         if: matrix.format == 'deb'
@@ -75,26 +87,10 @@ jobs:
       - name: Install toolchain (RHEL/Rocky/Fedora)
         if: matrix.format == 'rpm'
         run: |
-          # The rockylinux:9 image ships a prebuilt dnf cache that can be stale
-          # relative to the live 9.x repos; that mismatch makes the modular
-          # `ruby` packages fail transaction check with "No available modular
-          # metadata for modular package". Refresh the metadata and pin a valid
-          # ruby module stream before installing so the modulemd is present.
-          dnf -y clean all
-          rm -rf /var/cache/dnf
-          dnf -y makecache
           dnf -y install gcc make libacl-devel rpm-build redhat-rpm-config tar
           dnf -y module reset ruby || true
           dnf -y module enable ruby:3.3 || dnf -y module enable ruby:3.1 || true
           dnf -y install ruby ruby-devel
-          gem install --no-document fpm
-
-      - name: Install toolchain (Alpine)
-        if: matrix.format == 'apk'
-        run: |
-          # `bash` is required because packager.sh is a bash script (arrays,
-          # mapfile); Alpine has no bash by default.
-          apk add --no-cache build-base acl-dev ruby ruby-dev libffi-dev tar bash
           gem install --no-document fpm
 
       - name: Build shared library
@@ -106,9 +102,80 @@ jobs:
         # making `./packager.sh` fail with exit code 126, "Permission denied").
         run: bash packager.sh ${{ matrix.format }}
 
-      - name: Upload package to release
-        uses: softprops/action-gh-release@v2
+      - name: Upload package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pkg-${{ matrix.name }}
+          path: dist/*.${{ matrix.format }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------------
+  # Alpine is musl libc: GitHub's bundled Node20 is glibc-linked and CANNOT
+  # execute inside an `alpine:` container (every JS action — checkout,
+  # upload-artifact — would fail to load its interpreter). So we do NOT use
+  # `container:` here. Instead we check out and upload from the glibc host and
+  # build the .apk via `docker run`, which keeps the JS actions on glibc while
+  # still producing a genuine musl package.
+  # ------------------------------------------------------------------------
+  build-alpine:
+    name: Build (alpine)
+    needs: release-please
+    if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build .apk inside alpine:3.20
+        run: |
+          docker run --rm -v "${PWD}:/work" -w /work alpine:3.20 sh -c '
+            set -e
+            # bash is required because packager.sh uses bash-isms (arrays,
+            # mapfile); Alpine has no bash by default.
+            apk add --no-cache build-base acl-dev ruby ruby-dev libffi-dev tar bash
+            gem install --no-document fpm
+            make all
+            bash packager.sh apk
+          '
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pkg-alpine
+          path: dist/*.apk
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------------
+  # Publish: a single non-container glibc host job that downloads every built
+  # package and attaches all of them (.deb/.rpm/.apk) to the GitHub Release in
+  # one shot. This is the ONLY job that needs `contents: write`, and the only
+  # one that runs softprops/action-gh-release (a JS action that must run on
+  # glibc — another reason it lives outside the alpine container).
+  # ------------------------------------------------------------------------
+  publish:
+    name: Publish packages to release
+    needs: [release-please, build-glibc, build-alpine]
+    if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      - name: Download all package artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          # Flatten the per-leg artifacts (pkg-debian/, pkg-rockylinux/,
+          # pkg-alpine/) into a single dist/ directory.
+          merge-multiple: true
+
+      - name: Attach packages to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ env.TAG }}
-          files: dist/*.${{ matrix.format }}
+          files: dist/*
           fail_on_unmatched_files: true

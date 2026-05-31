@@ -11,11 +11,16 @@
 #
 # Usage:
 #   docker compose run --rm test-debian
+#   docker compose run --rm test-ubuntu
 #   docker compose run --rm test-rocky
 #   docker compose run --rm test-rhel
+#   docker compose run --rm test-fedora
+#   docker compose run --rm test-opensuse
+#   docker compose run --rm test-arch
 #   docker compose run --rm test-alpine
 #
-# Or use the convenience wrapper: ./docker-test.sh [debian|rocky|rhel|alpine|all]
+# Or use the convenience wrapper:
+#   ./docker-test.sh [debian|ubuntu|rocky|rhel|fedora|opensuse|arch|alpine|all]
 #
 # Windows (Docker Desktop, PowerShell or Git Bash) works identically, e.g.:
 #   docker compose run --rm test-debian
@@ -26,6 +31,16 @@ services:
       context: .
       dockerfile: docker/Dockerfile.debian
     image: why-denied-test-debian
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+
+  test-ubuntu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ubuntu
+    image: why-denied-test-ubuntu
     volumes:
       - .:/src:ro
     working_dir: /work
@@ -51,6 +66,38 @@ services:
       - .:/src:ro
     working_dir: /work
     command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make HAVE_LIBACL=0 && bash tests/test_denied.sh"]
+
+  test-fedora:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.fedora
+    image: why-denied-test-fedora
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+
+  test-opensuse:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.opensuse
+    image: why-denied-test-opensuse
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+
+  # Arch has no native fpm package target (PKGBUILD/AUR), but it builds + passes
+  # the suite like any other glibc distro; `acl` bundles headers + setfacl.
+  test-arch:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.arch
+    image: why-denied-test-arch
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
 
   test-alpine:
     build:

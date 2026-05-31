@@ -13,7 +13,7 @@ jobs:
     name: Lint (cppcheck + clang-format)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install tooling
         run: sudo apt-get update && sudo apt-get install -y cppcheck clang-format
       - name: clang-format (dry run)
@@ -32,7 +32,7 @@ jobs:
       matrix:
         cc: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y libacl1-dev
       - name: Build shared library
@@ -58,8 +58,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: [debian, rocky, rhel, alpine]
+        distro: [debian, ubuntu, rocky, rhel, fedora, opensuse, arch, alpine]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Enable a docker-container BuildKit builder so we can use the GitHub
+      # Actions cache backend (type=gha) for Docker layer caching.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      # Build the per-distro image with BuildKit GHA layer caching. Each distro
+      # gets its own cache scope so e.g. openSUSE's heavy `zypper refresh
+      # repo-oss` layer is restored from cache instead of rebuilt every run.
+      # `load: true` exports the result into the local docker image store under
+      # the SAME name docker-compose expects (why-denied-test-<distro>), so the
+      # `docker compose run` below reuses it instead of triggering a rebuild —
+      # keeping "works locally == works in CI".
+      - name: Build ${{ matrix.distro }} image (cached)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: docker/Dockerfile.${{ matrix.distro }}
+          tags: why-denied-test-${{ matrix.distro }}
+          load: true
+          cache-from: type=gha,scope=${{ matrix.distro }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.distro }}
+
+      # Run the SAME command as the local workflow (docker compose -> "make &&
+      # bash tests/test_denied.sh"). The image is already built+loaded above, so
+      # compose reuses it rather than rebuilding.
       - name: Run test suite in ${{ matrix.distro }} container
-        run: bash docker-test.sh ${{ matrix.distro }}
+        run: docker compose run --rm test-${{ matrix.distro }}

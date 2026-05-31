@@ -19,7 +19,11 @@
 # re-exec the interactive shell once, with a guard variable so we never loop.
 # This makes "every interactive shell is preloaded" literally true.
 
-if [ -t 1 ]; then
+# Only act when stdout is a terminal (a human is present) AND the shared object
+# is actually installed. The `-e` guard avoids polluting LD_PRELOAD with a path
+# that ld.so cannot find — otherwise a half-removed package (hook present, .so
+# gone) would emit an "object not found" warning on EVERY exec.
+if [ -t 1 ] && [ -e /usr/lib/why-denied/why-denied.so ]; then
     # Append our path idempotently — the login re-exec below re-sources this
     # file, and we must not grow LD_PRELOAD with a duplicate entry each time.
     case ":${LD_PRELOAD}:" in

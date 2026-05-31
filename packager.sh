@@ -20,9 +20,14 @@ set -euo pipefail
 # Configurable metadata (override via environment).
 # --------------------------------------------------------------------------
 NAME="why-denied"
-VERSION="$(tr -d ' \t\r\n' < version.txt 2>/dev/null || echo 0.1.0)"
+# version.txt is the single source of truth (kept in sync by release-please).
+# Fail hard rather than silently shipping a wrong/stale version.
+VERSION="$(tr -d ' \t\r\n' < version.txt)" \
+    || { printf 'error: cannot read version.txt\n' >&2; exit 1; }
+[ -n "${VERSION}" ] || { printf 'error: version.txt is empty\n' >&2; exit 1; }
 ARCH="${ARCH:-$(uname -m)}"
-MAINTAINER="${MAINTAINER:-why-denied contributors <noreply@example.com>}"
+# GitHub no-reply form by default; override with MAINTAINER=... for a real one.
+MAINTAINER="${MAINTAINER:-why-denied contributors <doper1@users.noreply.github.com>}"
 DESCRIPTION="Human-readable root-cause analysis for Permission Denied (EACCES/EPERM) errors."
 URL="${URL:-https://github.com/doper1/why-denied}"
 LICENSE="MIT"
@@ -83,8 +88,14 @@ run_fpm() {
 }
 
 build_deb() { run_fpm deb --depends libacl1; }
-build_rpm() { run_fpm rpm --depends libacl; }
-build_apk() { run_fpm apk --depends acl; }
+# Depend on the SONAME capability rather than a package name: the RPM families
+# disagree on the package name (RHEL/Rocky/Fedora ship `libacl`, openSUSE ships
+# `libacl5`), but they all PROVIDE `libacl.so.1()(64bit)`, so this one dependency
+# resolves everywhere. (64-bit targets only; our ARCH is x86_64/aarch64.)
+build_rpm() { run_fpm rpm --depends 'libacl.so.1()(64bit)'; }
+# On Alpine the shared library lives in the `libacl` package; `acl` is just the
+# setfacl/getfacl tools. why-denied.so links libacl.so.1, so depend on `libacl`.
+build_apk() { run_fpm apk --depends libacl; }
 
 main() {
     local what="${1:-all}"

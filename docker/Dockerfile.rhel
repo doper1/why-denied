@@ -14,7 +14,13 @@
 # Source is mounted at runtime (read-only) at /src; the entrypoint copies it
 # into the writable, tester-owned /work tree so the build + test run as an
 # unprivileged user regardless of the host bind-mount's ownership.
-FROM registry.access.redhat.com/ubi9/ubi:latest
+#
+# TEST IMAGE ONLY — grants the `tester` user passwordless root via sudo so the
+# behavioural suite can forge foreign ownership. Do NOT use as a production base.
+#
+# Pinned to the 9.6 minor stream (instead of the floating :latest) for
+# reproducible builds; bump deliberately when adopting a newer UBI 9.x.
+FROM registry.access.redhat.com/ubi9/ubi:9.6
 
 # shadow-utils provides useradd (not always present in the UBI base); `acl`
 # provides setfacl/getfacl for the ACL test fixture.

@@ -72,6 +72,10 @@ else
 fi
 
 WORK="$(mktemp -d)"
+if [ -z "${WORK}" ] || [ ! -d "${WORK}" ]; then
+    echo "error: mktemp -d failed to create a work directory" >&2
+    exit 1
+fi
 cleanup() {
     # Some fixtures are root-owned (sudo setup); remove them with sudo too.
     rm -rf "${WORK}" 2>/dev/null || true

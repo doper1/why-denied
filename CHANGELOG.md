@@ -11,26 +11,7 @@ from [Conventional Commits](https://www.conventionalcommits.org/).
 
 * mount on shell ([20a3277](https://github.com/doper1/why-denied/commit/20a327784dc37d017d17492349122200fd9d2ee9))
 
-## [0.1.0](https://github.com/doper1/why-denied/compare/why-denied-v0.1.0...why-denied-v0.1.0) (2026-05-31)
-
-
-### Bug Fixes
-
-* redundent pipeline setting ([74ca65e](https://github.com/doper1/why-denied/commit/74ca65e4556768eca8f7d93689312143d12ebc21))
-
-
-### Miscellaneous Chores
-
-* release 0.1.0 ([81b457e](https://github.com/doper1/why-denied/commit/81b457eaa2ab589f5403df1ae45c6ec788caafc6))
-
 ## 0.1.0 (2026-05-31)
-
-
-### Miscellaneous Chores
-
-* release 0.1.0 ([81b457e](https://github.com/doper1/why-denied/commit/81b457eaa2ab589f5403df1ae45c6ec788caafc6))
-
-## 0.1.0 (2026-01-01)
 
 ### Features
 
@@ -45,3 +26,13 @@ from [Conventional Commits](https://www.conventionalcommits.org/).
 * Interactive-session-only activation via TTY detection and the
   `/etc/profile.d` hook.
 * Cross-distro packaging (`.deb`, `.rpm`, `.apk`) via fpm.
+
+
+### Bug Fixes
+
+* redundent pipeline setting ([74ca65e](https://github.com/doper1/why-denied/commit/74ca65e4556768eca8f7d93689312143d12ebc21))
+
+
+### Miscellaneous Chores
+
+* release 0.1.0 ([81b457e](https://github.com/doper1/why-denied/commit/81b457eaa2ab589f5403df1ae45c6ec788caafc6))

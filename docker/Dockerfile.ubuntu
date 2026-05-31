@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1
-# why-denied test image — Debian 12 (glibc).
+# why-denied test image — Ubuntu 22.04 LTS (glibc, Debian family).
+#
+# Ubuntu is the most widely deployed server/desktop distribution; it shares the
+# Debian apt/.deb lineage but ships its own toolchain and base, so it earns its
+# own row in the matrix alongside debian:12.
 #
 # Source is mounted at runtime (read-only) at /src; the entrypoint copies it
 # into the writable, tester-owned /work tree so the build + test run as an
@@ -7,10 +11,14 @@
 #
 # TEST IMAGE ONLY — grants the `tester` user passwordless root via sudo so the
 # behavioural suite can forge foreign ownership. Do NOT use as a production base.
-FROM debian:12
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# build-essential -> cc + make; libacl1-dev -> ACL headers; acl -> setfacl/getfacl;
+# util-linux + bsdutils -> `script` (pty driver); python3 -> pty fallback. bash is
+# already present in the base image.
+#
 # The stock base image ships a docker-clean apt hook that purges downloaded
 # .debs (and prunes lists) after each install; disable it so the BuildKit cache
 # mounts below actually retain the data across builds.
@@ -30,10 +38,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         build-essential \
         libacl1-dev \
         acl \
-        cppcheck \
-        clang-format \
         util-linux \
         bsdutils \
+        python3 \
         sudo \
         ca-certificates
 

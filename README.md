@@ -186,16 +186,28 @@ variants resolve dirfd-relative paths through `/proc/self/fd/<dirfd>`, and
 
 ### From a prebuilt package
 
+Replace `<version>` with the release you downloaded (e.g. the current
+`version.txt`), and the architecture (`amd64`/`x86_64`) with your platform:
+
 ```bash
-# Debian / Ubuntu
-sudo apt install ./why-denied_0.1.0_amd64.deb
+# Debian / Ubuntu (.deb)
+sudo apt install ./why-denied_<version>_amd64.deb
+# or: sudo dpkg -i ./why-denied_<version>_amd64.deb
 
-# RHEL / Rocky / Fedora
-sudo dnf install ./why-denied-0.1.0.x86_64.rpm
+# RHEL / Rocky / Fedora (.rpm, dnf)
+sudo dnf install ./why-denied-<version>.x86_64.rpm
 
-# Alpine
-sudo apk add --allow-untrusted why-denied-0.1.0.apk
+# openSUSE Leap / Tumbleweed (.rpm, zypper)
+sudo zypper install ./why-denied-<version>.x86_64.rpm
+
+# Alpine (.apk)
+sudo apk add --allow-untrusted why-denied-<version>.apk
 ```
+
+> **Arch Linux** has no native `fpm` package target. Install from source (see
+> below) — `make && sudo make install` — or package it locally with a `PKGBUILD`
+> / publish to the AUR. Arch's `acl` package already bundles the libacl headers
+> and the `setfacl`/`getfacl` runtime, so no extra `-devel` package is needed.
 
 Each package installs `why-denied.so` to `/usr/lib/why-denied/` and the activation
 hook to `/etc/profile.d/why-denied.sh`. Open a new interactive shell and you're
@@ -216,6 +228,12 @@ sudo apt install -y build-essential libacl1-dev
 # RHEL / Rocky / Fedora
 sudo dnf install -y gcc make libacl-devel
 
+# openSUSE Leap / Tumbleweed
+sudo zypper install -y gcc make libacl-devel
+
+# Arch Linux (the `acl` package provides headers + setfacl)
+sudo pacman -S --needed base-devel acl
+
 # Alpine
 sudo apk add build-base acl-dev
 ```
@@ -226,6 +244,12 @@ cd why-denied
 make
 sudo make install        # -> /usr/lib/why-denied/why-denied.so + /etc/profile.d hook
 ```
+
+> **Arch Linux (no native package):** `make && sudo make install` is the
+> supported path. The install lands `why-denied.so` in `/usr/lib/why-denied/`
+> and the hook in `/etc/profile.d/why-denied.sh`, identical to the packaged
+> distros. To build a real package, wrap this in a `PKGBUILD` (`make install
+> DESTDIR="$pkgdir"`) and optionally publish it to the AUR.
 
 > No `libacl` available? Build the dependency-free variant, which detects ACLs
 > via the POSIX ACL xattr instead: `make HAVE_LIBACL=0 && sudo make install`.
@@ -347,24 +371,59 @@ dependent — they need a dedicated **enforcing VM**, not a container):
 
 ### Docker matrix (local — mirrors CI exactly)
 
-The same command CI runs (`make && bash tests/test_denied.sh`) is executed in
-glibc **and** musl containers, as an unprivileged user with passwordless sudo:
+The same command CI runs (`make && bash tests/test_denied.sh`) is executed
+across a glibc **and** musl distro matrix, as an unprivileged user with
+passwordless sudo:
+
+| Distro | `docker-test.sh` arg | libc | Package family |
+| ------ | -------------------- | ---- | -------------- |
+| Debian 12          | `debian`   | glibc | apt / `.deb` |
+| Ubuntu 22.04 LTS   | `ubuntu`   | glibc | apt / `.deb` |
+| Rocky Linux 9      | `rocky`    | glibc | dnf / `.rpm` |
+| RHEL 9 (Red Hat UBI) | `rhel`   | glibc | dnf / `.rpm` (xattr ACL fallback — no `libacl-devel`) |
+| Fedora 40          | `fedora`   | glibc | dnf / `.rpm` |
+| openSUSE Leap 15   | `opensuse` | glibc | zypper / `.rpm` |
+| Arch Linux         | `arch`     | glibc | pacman (no native package target) |
+| Alpine             | `alpine`   | musl  | apk / `.apk` |
 
 ```bash
-./docker-test.sh debian     # Debian 12  (glibc)
-./docker-test.sh rocky      # Rocky 9    (glibc, RPM)
-./docker-test.sh rhel       # RHEL 9     (glibc, RPM — Red Hat UBI; xattr ACL fallback)
-./docker-test.sh alpine     # Alpine     (musl)
-./docker-test.sh all        # all four, with a combined summary
+./docker-test.sh            # no arg -> debian only (fast, recommended locally)
+./docker-test.sh debian     # Debian 12        (glibc, apt/.deb)
+./docker-test.sh ubuntu     # Ubuntu 22.04 LTS (glibc, apt/.deb)
+./docker-test.sh rocky      # Rocky 9          (glibc, dnf/.rpm)
+./docker-test.sh rhel       # RHEL 9           (glibc, dnf/.rpm — Red Hat UBI; xattr ACL fallback)
+./docker-test.sh fedora     # Fedora 40        (glibc, dnf/.rpm)
+./docker-test.sh opensuse   # openSUSE Leap 15 (glibc, zypper/.rpm)
+./docker-test.sh arch       # Arch Linux       (glibc, pacman)
+./docker-test.sh alpine     # Alpine           (musl, apk/.apk)
+./docker-test.sh all        # every distro above (slow cold build — CI sweep)
 ```
+
+> **Run one distro locally; reserve `all` for CI.** With no argument the wrapper
+> runs only `debian`, the fast representative. `all` cold-builds eight base
+> images — openSUSE/Arch/Fedora are heavy and the first run can take **many
+> minutes** (openSUSE alone ~1000s+ before the layer cache is warm). It exists
+> for the CI matrix and deliberate full sweeps, not day-to-day iteration.
+>
+> **First-build slowness is expected**, and almost entirely one-time: Docker
+> caches each image's base layer + the package-install layer, so re-runs against
+> an unchanged Dockerfile reuse the cache and start in seconds. Editing a
+> `docker/Dockerfile.*` invalidates that distro's layer and re-triggers its
+> install. If builds are slow or get OOM-killed, raise Docker Desktop's CPU /
+> memory allocation (Settings → Resources) — the compiles and package managers
+> are the bottleneck.
 
 Under the hood this is plain `docker compose`, so you can also drive services
 directly:
 
 ```bash
 docker compose run --rm test-debian
+docker compose run --rm test-ubuntu
 docker compose run --rm test-rocky
 docker compose run --rm test-rhel
+docker compose run --rm test-fedora
+docker compose run --rm test-opensuse
+docker compose run --rm test-arch
 docker compose run --rm test-alpine
 ```
 
@@ -444,17 +503,19 @@ shell without the preload.
 >
 > The shim also stays silent unless STDERR is a TTY and the user is non-root, so
 > redirecting stderr to a file or running as root shows no `[why-denied]` output
-> — by design. Swap `test-debian` for `test-rocky` or `test-alpine` to try the
-> other libc/distro families.
+> — by design. Swap `test-debian` for any other service (`test-ubuntu`,
+> `test-rocky`, `test-rhel`, `test-fedora`, `test-opensuse`, `test-arch`,
+> `test-alpine`) to try the other libc/distro families.
 
 ### Local ⇄ CI parity
 
 `.github/workflows/ci.yml` keeps the existing **lint** (`clang-format` +
 `cppcheck`) and **build** (`gcc`/`clang`) jobs, and runs the **test** job as a
-`debian`/`rocky`/`alpine` matrix that invokes `bash docker-test.sh <distro>` —
-the identical entrypoint you use locally. A non-zero exit from
-`tests/test_denied.sh` fails the job. `acl`/`setfacl` is installed in every
-image so the ACL path is exercised in CI as well.
+`debian`/`ubuntu`/`rocky`/`rhel`/`fedora`/`opensuse`/`arch`/`alpine` matrix that
+invokes `bash docker-test.sh <distro>` — the identical entrypoint you use
+locally. A non-zero exit from `tests/test_denied.sh` fails the job.
+`acl`/`setfacl` is installed in every image so the ACL path is exercised in CI
+as well.
 
 > musl note: on Alpine, `-ldl` is satisfied by musl's libc, `script` ships in
 > the `util-linux-misc` subpackage (with `python3` as a pty fallback), and the
@@ -478,8 +539,12 @@ gem install fpm          # one-time
 ./packager.sh deb        # or a single format
 ```
 
-CI builds these natively inside `debian`, `rockylinux` and `alpine` containers
-on every tagged release and attaches them to the GitHub Release.
+On every tagged release CI builds these natively — the `.deb` (debian:12) and
+`.rpm` (Rocky/Quay) inside their own glibc containers, and the `.apk` via a
+`docker run alpine:3.20` step on a glibc host (GitHub's bundled Node20 cannot
+run JS actions inside a musl container, so the build, not the action, runs in
+Alpine). A separate non-container job then downloads all three artifacts and
+attaches them to the GitHub Release in one step.
 
 ---
 

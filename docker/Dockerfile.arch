@@ -1,0 +1,50 @@
+# why-denied test image — Arch Linux (glibc, rolling release).
+#
+# Arch uses pacman and has no native fpm package target (packaging is PKGBUILD /
+# AUR), but it builds and passes the behavioural suite like any other glibc
+# distro. On Arch the `acl` package bundles BOTH the libacl headers and the
+# setfacl/getfacl runtime (no separate -devel split), so the default
+# libacl-backed build links cleanly.
+#
+# Source is mounted at runtime (read-only) at /src; the entrypoint copies it
+# into the writable, tester-owned /work tree so the build + test run as an
+# unprivileged user regardless of the host bind-mount's ownership.
+#
+# TEST IMAGE ONLY — grants the `tester` user passwordless root via sudo so the
+# behavioural suite can forge foreign ownership. Do NOT use as a production base.
+FROM archlinux:latest
+
+# base-devel -> cc + make (+ sudo); acl -> libacl headers AND setfacl/getfacl;
+# util-linux -> `script` (pty driver); python -> python3 pty fallback. bash is
+# in base.
+#
+# Single cached RUN. We refresh the package DB and install the needed packages
+# (`-Sy`) but deliberately skip the full system upgrade (`-Syu`): on a fresh
+# pull of `archlinux:latest` the base is already current, and dropping the
+# upgrade saves the slowest part of the build. Caveat: Arch is rolling, so a
+# `-Sy` without `-u` is the classic "partial upgrade" footgun for a
+# long-lived system — it is only safe here because this is a throwaway,
+# always-rebuilt-from-a-current-base test image. Rebuild (don't `pacman -Sy`
+# inside) to pick up newer packages.
+RUN pacman -Sy --noconfirm \
+        base-devel \
+        acl \
+        util-linux \
+        python \
+        sudo \
+        bash \
+    && pacman -Scc --noconfirm \
+    && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
+
+# Unprivileged test user with passwordless sudo (permission tests are only
+# meaningful when the prober is NOT root).
+RUN useradd -m -s /bin/bash tester \
+    && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester \
+    && chmod 0440 /etc/sudoers.d/tester \
+    && mkdir -p /work \
+    && chown tester:tester /work
+
+USER tester
+WORKDIR /work
+
+CMD ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]

@@ -11,7 +11,12 @@
 # Source is mounted at runtime (read-only) at /src; the entrypoint copies it
 # into the writable, tester-owned /work tree so the build + test run as an
 # unprivileged user regardless of the host bind-mount's ownership.
-FROM alpine:latest
+#
+# TEST IMAGE ONLY — grants the `tester` user passwordless root via sudo so the
+# behavioural suite can forge foreign ownership. Do NOT use as a production base.
+#
+# Pinned to alpine:3.20 to match the .apk build base in .github/workflows/release.yml.
+FROM alpine:3.20
 
 RUN apk add --no-cache \
         build-base \

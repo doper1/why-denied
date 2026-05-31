@@ -35,6 +35,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
@@ -43,6 +45,19 @@
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
+#endif
+
+/* Inode attribute flags / ioctl (from <linux/fs.h>); hard-coded so the library
+ * builds on toolchains where that header is unavailable. Used to detect
+ * immutable/append-only files (chattr +i/+a) before blaming an LSM. */
+#ifndef FS_IOC_GETFLAGS
+#define FS_IOC_GETFLAGS _IOR('f', 1, long)
+#endif
+#ifndef FS_IMMUTABLE_FL
+#define FS_IMMUTABLE_FL 0x00000010
+#endif
+#ifndef FS_APPEND_FL
+#define FS_APPEND_FL 0x00000020
 #endif
 
 /* Filesystem magic numbers (from <linux/magic.h>); hard-coded so the library
@@ -72,12 +87,14 @@ static __thread int g_in_inspect = 0;
  * ---------------------------------------------------------------------- */
 
 enum access_kind {
-    AK_READ,    /* needs read bit on the target file */
-    AK_WRITE,   /* needs write bit on the target (or create into parent) */
-    AK_EXEC,    /* needs execute bit on the target file */
-    AK_CREATE,  /* needs write + search on the parent directory */
-    AK_DELETE,  /* like CREATE, plus sticky-bit consideration */
-    AK_OWNER_OP /* chmod/chown: requires ownership (or root) */
+    AK_READ,   /* needs read bit on the target file */
+    AK_WRITE,  /* needs write bit on the target (or create into parent) */
+    AK_RDWR,   /* O_RDWR: needs BOTH read and write bits on the target */
+    AK_EXEC,   /* needs execute bit on the target file */
+    AK_CREATE, /* needs write + search on the parent directory */
+    AK_DELETE, /* like CREATE, plus sticky-bit consideration */
+    AK_CHMOD,  /* chmod/fchmod/fchmodat: requires ownership (or root) */
+    AK_CHOWN   /* chown/fchown/fchownat: owner can't give away / set group */
 };
 
 /* -------------------------------------------------------------------------
@@ -135,6 +152,10 @@ static void resolve_sym(void **slot, const char *name)
  * may happen while the C library holds an internal stdio lock, and re-entering
  * it could deadlock. write(2) on a stack buffer is reentrancy-safe and never
  * allocates.
+ *
+ * NOTE: this is NOT async-signal-safe — vsnprintf() is not on the AS-safe list.
+ * That is fine: we only run from normal application context after a failed libc
+ * call (never from a signal handler) and behind the per-thread reentrancy guard.
  * ---------------------------------------------------------------------- */
 static void emitf(const char *fmt, ...)
 {
@@ -157,15 +178,38 @@ static void emitf(const char *fmt, ...)
  * Small POSIX permission helpers.
  * ---------------------------------------------------------------------- */
 
-/* Is the calling process a member of group g (effective or supplementary)? */
+/* Is the calling process a member of group g (effective or supplementary)?
+ * Returns 1 = member, 0 = not a member, -1 = membership could not be
+ * determined (so the caller must not assert a definitive group/other class). */
 static int in_group(gid_t g)
 {
     if (getegid() == g)
         return 1;
-    /* Fixed stack buffer: avoids malloc on the cold path. If a process belongs
-     * to an unusually large number of groups we simply degrade gracefully. */
+    /* Fixed stack buffer first: avoids malloc in the common case. */
     gid_t list[256];
     int n = getgroups((int)(sizeof list / sizeof list[0]), list);
+    if (n < 0) {
+        /* The process belongs to more groups than our buffer holds
+         * (getgroups returned EINVAL). Re-query the exact count and use a
+         * heap buffer. This only happens on the cold diagnostic path. */
+        int count = getgroups(0, NULL);
+        if (count > 0) {
+            gid_t *dyn = malloc((size_t)count * sizeof *dyn);
+            if (dyn != NULL) {
+                int m = getgroups(count, dyn);
+                int found = 0;
+                for (int i = 0; i < m; i++)
+                    if (dyn[i] == g) {
+                        found = 1;
+                        break;
+                    }
+                free(dyn);
+                if (m >= 0)
+                    return found;
+            }
+        }
+        return -1; /* genuinely unknown — don't claim "not a member" */
+    }
     for (int i = 0; i < n; i++)
         if (list[i] == g)
             return 1;
@@ -179,7 +223,14 @@ static int eff_class(const struct stat *st)
 {
     if (st->st_uid == geteuid())
         return CLASS_OWNER;
-    if (in_group(st->st_gid))
+    int member = in_group(st->st_gid);
+    if (member == 1)
+        return CLASS_GROUP;
+    if (member < 0)
+        /* Membership is genuinely unknown (couldn't enumerate groups). We
+         * already know the caller is not the owner; assume the group class
+         * rather than asserting "other", since a wrong "grants to ALL users"
+         * other-class hint would be the more harmful misattribution. */
         return CLASS_GROUP;
     return CLASS_OTHER;
 }
@@ -213,19 +264,38 @@ static char class_char(int cls)
  * Path helpers for the *at() family and fd-based calls.
  * ---------------------------------------------------------------------- */
 
+/* A /proc/self/fd readlink result is only a usable path if it is absolute and
+ * not a synthetic name (pipe:[...], socket:[...], anon_inode:..., or a
+ * "<path> (deleted)" tombstone). Returns 1 if the link looks like a real path. */
+static int is_real_path_link(const char *link, size_t len)
+{
+    if (len == 0 || link[0] != '/')
+        return 0;
+    static const char deleted[] = " (deleted)";
+    size_t dl = sizeof deleted - 1;
+    if (len >= dl && memcmp(link + len - dl, deleted, dl) == 0)
+        return 0;
+    return 1;
+}
+
 /*
  * Best-effort resolution of an *at() path to something stat() can use.
  *  - Absolute paths and AT_FDCWD-relative paths are returned unchanged
  *    (a relative path already resolves against the cwd for stat()).
  *  - A dirfd-relative path is joined with the directory that dirfd refers to,
  *    discovered via /proc/self/fd/<dirfd>.
+ *  - An empty path with a dirfd means AT_EMPTY_PATH: use the fd target itself.
+ *  - Synthetic fd targets (pipe:/socket:/anon_inode:/deleted) yield NULL so the
+ *    caller emits no misleading message.
  *  - If anything is unresolvable we degrade gracefully to the raw path.
  */
 static const char *resolve_at(int dirfd, const char *path, char *buf,
                               size_t bufsz)
 {
-    if (path == NULL || path[0] == '/' || dirfd == AT_FDCWD)
-        return path;
+    if (path != NULL && path[0] == '/')
+        return path; /* already absolute */
+    if (dirfd == AT_FDCWD || path == NULL)
+        return path; /* relative-to-cwd (stat handles it) or nothing to do */
 
     char link[64];
     snprintf(link, sizeof link, "/proc/self/fd/%d", dirfd);
@@ -233,8 +303,23 @@ static const char *resolve_at(int dirfd, const char *path, char *buf,
     char dir[PATH_MAX];
     ssize_t r = readlink(link, dir, sizeof dir - 1);
     if (r < 0)
-        return path; /* degrade */
+        return path; /* degrade to the raw path */
     dir[r] = '\0';
+
+    /* Reject synthetic dirfd targets: building "pipe:[...]/foo" would only
+     * yield a misleading diagnosis. Bail to no message. */
+    if (!is_real_path_link(dir, (size_t)r))
+        return NULL;
+
+    /* AT_EMPTY_PATH (e.g. execveat(fd, "", ..., AT_EMPTY_PATH)): the operation
+     * targets the fd itself. Use the readlink target verbatim — appending "/"
+     * would produce a path that cannot be stat()ed. */
+    if (path[0] == '\0') {
+        int n = snprintf(buf, bufsz, "%s", dir);
+        if (n < 0 || (size_t)n >= bufsz)
+            return NULL;
+        return buf;
+    }
 
     int n = snprintf(buf, bufsz, "%s/%s", dir, path);
     if (n < 0 || (size_t)n >= bufsz)
@@ -251,6 +336,10 @@ static const char *path_from_fd(int fd, char *buf, size_t bufsz)
     if (r < 0)
         return NULL;
     buf[r] = '\0';
+    /* Don't treat a synthetic name (pipe:/socket:/anon_inode:) or a deleted
+     * tombstone as a real path; doing so would produce a misleading message. */
+    if (!is_real_path_link(buf, (size_t)r))
+        return NULL;
     return buf;
 }
 
@@ -287,11 +376,22 @@ static void parent_of(const char *path, char *buf, size_t bufsz)
  * Order: ACL  ->  Network filesystem  ->  Mandatory Access Control.
  * ---------------------------------------------------------------------- */
 
+/*
+ * NOTE on async-signal-safety: this diagnostic path is deliberately NOT
+ * async-signal-safe. emitf() uses vsnprintf(), and the libacl probe below
+ * (acl_get_file) allocates. We only ever run after a *failed* libc call from
+ * application context (never from a signal handler) and behind the per-thread
+ * reentrancy guard, so this is acceptable. The non-libacl build instead uses a
+ * single allocation-free getxattr() probe; prefer that build (omit HAVE_LIBACL)
+ * if you need the interposed path to avoid heap allocation entirely.
+ */
 #ifdef HAVE_LIBACL
 #include <sys/acl.h>
 
 /* An object carries an "extended" ACL when it has at least one named user,
- * named group or mask entry beyond the three base (owner/group/other) ones. */
+ * named group or mask entry beyond the three base (owner/group/other) ones.
+ * Trade-off: acl_get_file() allocates; the #else branch below is allocation-
+ * free (getxattr) and is preferred where async-signal-safety matters. */
 static int has_extended_acl(const char *path)
 {
     acl_t acl = acl_get_file(path, ACL_TYPE_ACCESS);
@@ -356,10 +456,43 @@ static void advanced_triage(const char *path)
         }
     }
 
-    /* Nothing in POSIX/ACL/NFS explains it: a Mandatory Access Control layer
-     * is the most likely culprit. */
-    emitf("Blocked by Linux Security Module (SELinux/AppArmor) policy. "
-          "Check 'dmesg' or 'audit2why'.");
+    /* Before blaming an LSM, probe for an immutable / append-only inode flag
+     * (chattr +i / +a) — a frequent, easily-missed cause of EPERM that POSIX
+     * bits and ACLs cannot express. Cold path only; we gracefully ignore
+     * filesystems that don't support FS_IOC_GETFLAGS (ENOTTY/EOPNOTSUPP) or a
+     * target we cannot open. The open() here is our own interposed wrapper but
+     * the reentrancy guard is set, so it will not recurse into analysis. */
+    int afd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (afd >= 0) {
+        int attrs = 0;
+        if (ioctl(afd, FS_IOC_GETFLAGS, &attrs) == 0) {
+            if (attrs & FS_IMMUTABLE_FL) {
+                close(afd);
+                emitf("Cannot modify '%s': the file is IMMUTABLE (chattr +i). "
+                      "Clear it with 'chattr -i %s' (needs root / "
+                      "CAP_LINUX_IMMUTABLE).",
+                      path, path);
+                return;
+            }
+            if (attrs & FS_APPEND_FL) {
+                close(afd);
+                emitf("Cannot modify '%s': the file is APPEND-ONLY "
+                      "(chattr +a); only appends are allowed. Clear it with "
+                      "'chattr -a %s' (needs root / CAP_LINUX_IMMUTABLE).",
+                      path, path);
+                return;
+            }
+        }
+        close(afd);
+    }
+
+    /* Nothing in POSIX/ACL/NFS/attributes explains it. Stay non-authoritative
+     * rather than asserting an LSM: it's the most likely cause but not the only
+     * one, and a confident wrong answer is worse than an honest pointer. */
+    emitf("Could not attribute this to POSIX/ACL/NFS permissions — likely a "
+          "Linux Security Module (SELinux/AppArmor), a file attribute "
+          "(chattr +i/+a), or another kernel policy. Check 'dmesg' or "
+          "'audit2why'.");
 }
 
 /* -------------------------------------------------------------------------
@@ -385,15 +518,25 @@ static void report_missing_perm(const char *path, const char *verb,
 }
 
 /*
- * Walk every ancestor directory of an absolute path and report the first one
- * the effective user cannot search (missing execute bit). Returns 1 if it
- * emitted a diagnosis, 0 otherwise (so the caller can fall through to the
- * advanced engine). Only handles absolute paths; relative paths return 0.
+ * Walk every ancestor directory of a path and report the first one the
+ * effective user cannot search (missing execute bit). Returns 1 if it emitted
+ * a diagnosis, 0 otherwise (so the caller can fall through to the advanced
+ * engine). Relative paths are resolved against getcwd() (cold path only) so
+ * search-bit denials like `cat foo/bar` are diagnosed instead of escalating
+ * to the LSM catch-all; if getcwd() fails we degrade to the old behavior.
  */
 static int report_missing_search(const char *path)
 {
-    if (path[0] != '/')
-        return 0;
+    char abspath[PATH_MAX];
+    if (path[0] != '/') {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof cwd) == NULL)
+            return 0; /* cannot resolve: degrade, let caller fall back */
+        int an = snprintf(abspath, sizeof abspath, "%s/%s", cwd, path);
+        if (an < 0 || (size_t)an >= sizeof abspath)
+            return 0;
+        path = abspath;
+    }
 
     size_t n = strlen(path);
     if (n == 0 || n >= PATH_MAX)
@@ -475,13 +618,28 @@ static void analyze_denial(const char *path, enum access_kind kind)
     char parent[PATH_MAX];
 
     switch (kind) {
-    case AK_OWNER_OP: {
-        if (stat(path, &st) == 0) {
-            if (geteuid() != 0 && st.st_uid != geteuid()) {
+    case AK_CHMOD:
+    case AK_CHOWN: {
+        /* lstat (not stat): chmod/chown ownership rules are about the named
+         * object itself, and fchmodat/fchownat may carry AT_SYMLINK_NOFOLLOW.
+         * Using lstat avoids blaming/inspecting a symlink's target. */
+        if (lstat(path, &st) == 0) {
+            uid_t euid = geteuid();
+            if (euid != 0 && st.st_uid != euid) {
                 emitf("Cannot change attributes of '%s': You are not the owner "
                       "(owned by uid %u). Only the owner or root may change "
                       "permissions/ownership.",
                       path, (unsigned)st.st_uid);
+                break;
+            }
+            if (kind == AK_CHOWN && euid != 0 && st.st_uid == euid) {
+                /* The caller owns the file but chown still failed: an
+                 * unprivileged process may not give a file away, nor set a
+                 * group it does not belong to. That requires root/CAP_CHOWN. */
+                emitf("Cannot change ownership of '%s': you own it, but "
+                      "changing a file's owner (or setting a group you don't "
+                      "belong to) requires root or CAP_CHOWN.",
+                      path);
                 break;
             }
             /* Owner (or root) yet still EPERM: something beyond POSIX. */
@@ -503,8 +661,12 @@ static void analyze_denial(const char *path, enum access_kind kind)
          * owner (or the directory owner, or root) remove an entry. */
         if (kind == AK_DELETE) {
             struct stat pst, tst;
+            /* lstat on the target: unlink/rmdir act on the entry itself and
+             * never follow a final symlink, so the entry's own owner is what
+             * the sticky-bit rule checks. stat on the parent is correct — we
+             * want the real directory the entry lives in. */
             if (stat(parent, &pst) == 0 && (pst.st_mode & S_ISVTX) &&
-                stat(path, &tst) == 0) {
+                lstat(path, &tst) == 0) {
                 uid_t euid = geteuid();
                 if (euid != 0 && tst.st_uid != euid && pst.st_uid != euid) {
                     emitf("Cannot delete '%s': Directory '%s' has the sticky "
@@ -522,10 +684,27 @@ static void analyze_denial(const char *path, enum access_kind kind)
 
     case AK_READ:
     case AK_WRITE:
+    case AK_RDWR:
     case AK_EXEC: {
         if (stat(path, &st) == 0) {
             int cls = eff_class(&st);
             int bits = class_bits(&st, cls);
+
+            /* O_RDWR needs BOTH read and write bits. Report whichever is
+             * actually missing so a missing read bit on an O_RDWR open is not
+             * misattributed to a write/LSM problem. */
+            if (kind == AK_RDWR) {
+                if (!(bits & 4)) {
+                    report_missing_perm(path, "READ from", "read", 'r', cls);
+                    break;
+                }
+                if (!(bits & 2)) {
+                    report_missing_perm(path, "WRITE to", "write", 'w', cls);
+                    break;
+                }
+                advanced_triage(path);
+                break;
+            }
 
             int want;
             const char *verb, *permword;
@@ -570,7 +749,8 @@ static void analyze_denial(const char *path, enum access_kind kind)
              * lacks search permission. */
             if (!report_missing_search(path))
                 advanced_triage(path);
-        } else if (kind == AK_WRITE && errno == ENOENT) {
+        } else if ((kind == AK_WRITE || kind == AK_RDWR) &&
+                   errno == ENOENT) {
             /* open(O_CREAT) on a missing file fails in the parent directory. */
             parent_of(path, parent, sizeof parent);
             if (!check_parent_writable(parent))
@@ -640,6 +820,22 @@ done:
  * Intercepted wrappers.
  * ---------------------------------------------------------------------- */
 
+/* Classify an open()-family access mode. O_RDWR needs BOTH the read and write
+ * bits, so it maps to AK_RDWR (not AK_WRITE) — otherwise a missing read bit on
+ * an O_RDWR open would be misreported as a write/LSM problem. A bare O_CREAT
+ * (even with O_RDONLY) still needs to create the entry into the parent. */
+static enum access_kind open_access_kind(int flags)
+{
+    int amode = flags & O_ACCMODE;
+    if (amode == O_RDWR)
+        return AK_RDWR;
+    if (amode == O_WRONLY)
+        return AK_WRITE;
+    if (flags & O_CREAT)
+        return AK_WRITE;
+    return AK_READ;
+}
+
 /* open / openat are variadic: the optional mode_t is only present when the
  * flags request file creation (O_CREAT or O_TMPFILE). We extract it via
  * va_arg and always forward it — a spurious extra argument is ignored by the
@@ -658,9 +854,7 @@ int open(const char *pathname, int flags, ...)
     ENSURE(real_open, "open");
     int ret = real_open(pathname, flags, mode);
 
-    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
-                            : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
-                                                            : AK_READ;
+    enum access_kind kind = open_access_kind(flags);
     INSPECT(pathname, kind);
     return ret;
 }
@@ -678,9 +872,7 @@ int openat(int dirfd, const char *pathname, int flags, ...)
     ENSURE(real_openat, "openat");
     int ret = real_openat(dirfd, pathname, flags, mode);
 
-    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
-                            : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
-                                                            : AK_READ;
+    enum access_kind kind = open_access_kind(flags);
     INSPECT_AT(dirfd, pathname, kind);
     return ret;
 }
@@ -707,11 +899,18 @@ int open64(const char *pathname, int flags, ...)
     }
 
     ENSURE(real_open64, "open64");
-    int ret = real_open64(pathname, flags, mode);
+    /* musl >= 1.2.4 dropped the *64 aliases, so dlsym(RTLD_NEXT, "open64")
+     * can legitimately return NULL. Fall back to plain open() rather than
+     * dereferencing a NULL function pointer. */
+    int ret;
+    if (real_open64 != NULL) {
+        ret = real_open64(pathname, flags, mode);
+    } else {
+        ENSURE(real_open, "open");
+        ret = real_open(pathname, flags, mode);
+    }
 
-    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
-                            : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
-                                                            : AK_READ;
+    enum access_kind kind = open_access_kind(flags);
     INSPECT(pathname, kind);
     return ret;
 }
@@ -727,11 +926,16 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
     }
 
     ENSURE(real_openat64, "openat64");
-    int ret = real_openat64(dirfd, pathname, flags, mode);
+    /* See open64(): the *64 alias may be absent on musl >= 1.2.4. */
+    int ret;
+    if (real_openat64 != NULL) {
+        ret = real_openat64(dirfd, pathname, flags, mode);
+    } else {
+        ENSURE(real_openat, "openat");
+        ret = real_openat(dirfd, pathname, flags, mode);
+    }
 
-    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
-                            : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
-                                                            : AK_READ;
+    enum access_kind kind = open_access_kind(flags);
     INSPECT_AT(dirfd, pathname, kind);
     return ret;
 }
@@ -739,7 +943,14 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
 int creat64(const char *pathname, mode_t mode)
 {
     ENSURE(real_creat64, "creat64");
-    int ret = real_creat64(pathname, mode);
+    /* See open64(): the *64 alias may be absent on musl >= 1.2.4. */
+    int ret;
+    if (real_creat64 != NULL) {
+        ret = real_creat64(pathname, mode);
+    } else {
+        ENSURE(real_creat, "creat");
+        ret = real_creat(pathname, mode);
+    }
     INSPECT(pathname, AK_WRITE);
     return ret;
 }
@@ -805,7 +1016,7 @@ int chmod(const char *pathname, mode_t mode)
 {
     ENSURE(real_chmod, "chmod");
     int ret = real_chmod(pathname, mode);
-    INSPECT(pathname, AK_OWNER_OP);
+    INSPECT(pathname, AK_CHMOD);
     return ret;
 }
 
@@ -813,7 +1024,7 @@ int fchmod(int fd, mode_t mode)
 {
     ENSURE(real_fchmod, "fchmod");
     int ret = real_fchmod(fd, mode);
-    INSPECT_FD(fd, AK_OWNER_OP);
+    INSPECT_FD(fd, AK_CHMOD);
     return ret;
 }
 
@@ -821,7 +1032,7 @@ int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags)
 {
     ENSURE(real_fchmodat, "fchmodat");
     int ret = real_fchmodat(dirfd, pathname, mode, flags);
-    INSPECT_AT(dirfd, pathname, AK_OWNER_OP);
+    INSPECT_AT(dirfd, pathname, AK_CHMOD);
     return ret;
 }
 
@@ -829,7 +1040,7 @@ int chown(const char *pathname, uid_t owner, gid_t group)
 {
     ENSURE(real_chown, "chown");
     int ret = real_chown(pathname, owner, group);
-    INSPECT(pathname, AK_OWNER_OP);
+    INSPECT(pathname, AK_CHOWN);
     return ret;
 }
 
@@ -837,7 +1048,7 @@ int fchown(int fd, uid_t owner, gid_t group)
 {
     ENSURE(real_fchown, "fchown");
     int ret = real_fchown(fd, owner, group);
-    INSPECT_FD(fd, AK_OWNER_OP);
+    INSPECT_FD(fd, AK_CHOWN);
     return ret;
 }
 
@@ -846,7 +1057,7 @@ int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group,
 {
     ENSURE(real_fchownat, "fchownat");
     int ret = real_fchownat(dirfd, pathname, owner, group, flags);
-    INSPECT_AT(dirfd, pathname, AK_OWNER_OP);
+    INSPECT_AT(dirfd, pathname, AK_CHOWN);
     return ret;
 }
 
@@ -860,6 +1071,13 @@ int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group,
  * ---------------------------------------------------------------------- */
 __attribute__((constructor)) static void why_denied_init(void)
 {
+    /* Stay completely inert in a secure-execution context (setuid/setgid, file
+     * capabilities, AT_SECURE). Even though this library only ever reads, a
+     * preload installed via /etc/ld.so.preload would otherwise run our probing
+     * syscalls and write to STDERR inside privileged programs; refuse that.
+     * getauxval(AT_SECURE) is the kernel's authoritative signal here. */
+    if (getauxval(AT_SECURE) != 0)
+        g_disabled = 1;
     if (!isatty(STDERR_FILENO))
         g_disabled = 1;
     if (getenv("WHY_DENIED_DISABLE") != NULL)

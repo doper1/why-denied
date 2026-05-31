@@ -12,14 +12,18 @@
 # docker/).
 #
 # Usage:
-#   ./docker-test.sh [debian|rocky|alpine|all]
+#   ./docker-test.sh [debian|ubuntu|rocky|rhel|fedora|opensuse|arch|alpine|all]
 #
-# With no argument, runs all three. Exit status is non-zero if any selected
-# distro's test suite fails.
+# With NO argument it runs a single, fast, representative distro (debian) — the
+# whole 8-image matrix is a cold-build of multiple heavy base images (openSUSE
+# alone can take ~1000s+ on a first run) and is really CI-oriented. Run one
+# distro locally and reserve `all` for CI / a deliberate full sweep. Exit
+# status is non-zero if any selected distro's test suite fails.
 #
 # Windows: runs as-is from PowerShell or Git Bash with Docker Desktop, e.g.
 #   docker compose run --rm test-debian
-#   bash docker-test.sh all
+#   bash docker-test.sh debian
+#   bash docker-test.sh all       # slow: builds all 8 distro images
 
 set -euo pipefail
 
@@ -36,15 +40,26 @@ else
     exit 1
 fi
 
-target="${1:-all}"
+# Default to a single fast distro; `all` is opt-in (slow, CI-oriented).
+target="${1:-debian}"
 case "${target}" in
-    debian) services=(test-debian) ;;
-    rocky)  services=(test-rocky) ;;
-    rhel)   services=(test-rhel) ;;
-    alpine) services=(test-alpine) ;;
-    all)    services=(test-debian test-rocky test-rhel test-alpine) ;;
+    debian)   services=(test-debian) ;;
+    ubuntu)   services=(test-ubuntu) ;;
+    rocky)    services=(test-rocky) ;;
+    rhel)     services=(test-rhel) ;;
+    fedora)   services=(test-fedora) ;;
+    opensuse) services=(test-opensuse) ;;
+    arch)     services=(test-arch) ;;
+    alpine)   services=(test-alpine) ;;
+    all)
+        services=(test-debian test-ubuntu test-rocky test-rhel test-fedora test-opensuse test-arch test-alpine)
+        echo "WARNING: 'all' cold-builds 8 distro images (openSUSE/Arch/Fedora are heavy;" >&2
+        echo "         the first run can take many minutes). This is the CI sweep — for" >&2
+        echo "         local work prefer a single distro, e.g. '$0 debian'." >&2
+        ;;
     *)
-        echo "usage: $0 [debian|rocky|rhel|alpine|all]" >&2
+        echo "usage: $0 [debian|ubuntu|rocky|rhel|fedora|opensuse|arch|alpine|all]" >&2
+        echo "       (no argument runs 'debian'; 'all' runs the full, slow matrix)" >&2
         exit 2
         ;;
 esac
