@@ -34,7 +34,7 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make && bash tests/test_denied.sh"]
 
   test-ubuntu:
     build:
@@ -44,7 +44,7 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make && bash tests/test_denied.sh"]
 
   test-rocky:
     build:
@@ -54,7 +54,7 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make && bash tests/test_denied.sh"]
 
   # RHEL/UBI lacks libacl-devel, so it builds the libacl-free (xattr) variant.
   test-rhel:
@@ -65,7 +65,7 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make HAVE_LIBACL=0 && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make HAVE_LIBACL=0 && bash tests/test_denied.sh"]
 
   test-fedora:
     build:
@@ -75,7 +75,7 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make && bash tests/test_denied.sh"]
 
   test-opensuse:
     build:
@@ -85,7 +85,7 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make && bash tests/test_denied.sh"]
 
   # Arch has no native fpm package target (PKGBUILD/AUR), but it builds + passes
   # the suite like any other glibc distro; `acl` bundles headers + setfacl.
@@ -97,7 +97,7 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make && bash tests/test_denied.sh"]
 
   test-alpine:
     build:
@@ -107,4 +107,4 @@ services:
     volumes:
       - .:/src:ro
     working_dir: /work
-    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+    command: ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make && bash tests/test_denied.sh"]

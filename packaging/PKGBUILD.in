@@ -1,0 +1,40 @@
+# Maintainer: why-denied contributors <doper1@users.noreply.github.com>
+#
+# AUR-style SOURCE recipe for Arch Linux.
+#
+# Arch is packaged as a source recipe rather than a prebuilt binary on purpose:
+# it has no native `fpm` output target (fpm emits deb/rpm/apk, not pacman
+# packages), so the supported path is `makepkg`, which compiles why-denied from
+# the released source tarball on the user's own machine. This file is rendered
+# from packaging/PKGBUILD.in by `make pkgbuild` (which substitutes @VERSION@),
+# and attached to each GitHub Release alongside the binary packages.
+#
+# Usage:
+#   makepkg -si        # build + install from this directory
+pkgname=@NAME@
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Human-readable root-cause analysis for Permission Denied (EACCES/EPERM) errors."
+arch=('x86_64' 'aarch64')
+url="https://github.com/doper1/why-denied"
+license=('MIT')
+# `acl` bundles the libacl headers AND the setfacl/getfacl runtime on Arch, so
+# the default libacl-backed build links cleanly with no separate -devel package.
+depends=('acl')
+makedepends=('gcc' 'make')
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+# SKIP: the upstream tag tarball is verified by the release's own provenance;
+# regenerate with `updpkgsums` if you want a pinned checksum for AUR submission.
+sha256sums=('SKIP')
+
+build() {
+    cd "${pkgname}-${pkgver}"
+    make
+}
+
+package() {
+    cd "${pkgname}-${pkgver}"
+    # Installs why-denied.so to /usr/lib/why-denied and the profile.d hook,
+    # exactly like the packaged distros (PREFIX defaults to /usr).
+    make install DESTDIR="${pkgdir}"
+}

@@ -45,4 +45,4 @@ RUN useradd -m tester \
 USER tester
 WORKDIR /work
 
-CMD ["bash", "-c", "cp -r /src/. /work/ && make clean && make HAVE_LIBACL=0 && bash tests/test_denied.sh"]
+CMD ["bash", "-c", "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \\; && make clean && make HAVE_LIBACL=0 && bash tests/test_denied.sh"]

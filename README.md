@@ -187,27 +187,48 @@ variants resolve dirfd-relative paths through `/proc/self/fd/<dirfd>`, and
 ### From a prebuilt package
 
 Replace `<version>` with the release you downloaded (e.g. the current
-`version.txt`), and the architecture (`amd64`/`x86_64`) with your platform:
+`version.txt`). Release assets are named by **format + libc + variant + arch**,
+not per distro — because the compiled artifact is identical across distros that
+share those axes. Pick the asset that matches your system:
+
+| Asset | Serves |
+| ----- | ------ |
+| `why-denied_<version>_amd64-glibc.deb`        | Debian, Ubuntu, Mint, … (glibc, apt/dpkg) |
+| `why-denied-<version>.x86_64-glibc.rpm`       | Fedora, Rocky, openSUSE, … (glibc, libacl) |
+| `why-denied-<version>.x86_64-glibc-noacl.rpm` | RHEL/UBI (glibc, libacl-free xattr build) |
+| `why-denied-<version>-musl.apk`               | Alpine (musl) |
 
 ```bash
-# Debian / Ubuntu (.deb)
-sudo apt install ./why-denied_<version>_amd64.deb
-# or: sudo dpkg -i ./why-denied_<version>_amd64.deb
+# Debian / Ubuntu / Mint (.deb, glibc)
+sudo apt install ./why-denied_<version>_amd64-glibc.deb
+# or: sudo dpkg -i ./why-denied_<version>_amd64-glibc.deb
 
-# RHEL / Rocky / Fedora (.rpm, dnf)
-sudo dnf install ./why-denied-<version>.x86_64.rpm
+# Fedora / Rocky / openSUSE (.rpm, glibc, libacl) — dnf or zypper
+sudo dnf install ./why-denied-<version>.x86_64-glibc.rpm
+sudo zypper install ./why-denied-<version>.x86_64-glibc.rpm
 
-# openSUSE Leap / Tumbleweed (.rpm, zypper)
-sudo zypper install ./why-denied-<version>.x86_64.rpm
+# RHEL / UBI (.rpm, glibc) — libacl-free xattr build, no libacl dependency
+sudo dnf install ./why-denied-<version>.x86_64-glibc-noacl.rpm
 
-# Alpine (.apk)
-sudo apk add --allow-untrusted why-denied-<version>.apk
+# Alpine (.apk, musl)
+sudo apk add --allow-untrusted why-denied-<version>-musl.apk
 ```
 
-> **Arch Linux** has no native `fpm` package target. Install from source (see
-> below) — `make && sudo make install` — or package it locally with a `PKGBUILD`
-> / publish to the AUR. Arch's `acl` package already bundles the libacl headers
-> and the `setfacl`/`getfacl` runtime, so no extra `-devel` package is needed.
+> **Why one `.deb` and (mostly) one `.rpm`?** The single glibc `.deb` works on
+> every Debian-family distro (they all ship `libacl1`), and the single glibc
+> `.rpm` resolves on Fedora/Rocky/openSUSE alike — it depends on the
+> `libacl.so.1` SONAME, which all of them PROVIDE despite naming the package
+> differently (`libacl` vs `libacl5`). RHEL/UBI gets its own `-glibc-noacl`
+> `.rpm` because that base ships no `libacl-devel`, so it is built libacl-free.
+
+> **Arch Linux** ships a **source recipe**, not a prebuilt binary: each release
+> attaches a `PKGBUILD`. Build + install it with `makepkg -si`, or just install
+> from source (`make && sudo make install`). Arch's `acl` package already
+> bundles the libacl headers and the `setfacl`/`getfacl` runtime, so no extra
+> `-devel` package is needed.
+
+> **From source on anything else:** each release also attaches a plain source
+> tarball, `why-denied-<version>.tar.gz`.
 
 Each package installs `why-denied.so` to `/usr/lib/why-denied/` and the activation
 hook to `/etc/profile.d/why-denied.sh`. Open a new interactive shell and you're
@@ -448,7 +469,7 @@ as the unprivileged `tester` user — exactly the conditions the shim needs to
 engage:
 
 ```bash
-docker compose run --rm test-debian bash -c "cp -r /src/. /work/ && make && LD_PRELOAD=/work/why-denied.so exec bash"
+docker compose run --rm test-debian bash -c "find /src -mindepth 1 -maxdepth 1 ! -name .git -exec cp -rf {} /work/ \; && make && LD_PRELOAD=/work/why-denied.so exec bash"
 ```
 
 Now trigger a few denials — just run the commands normally:
@@ -539,12 +560,41 @@ gem install fpm          # one-time
 ./packager.sh deb        # or a single format
 ```
 
-On every tagged release CI builds these natively — the `.deb` (debian:12) and
-`.rpm` (Rocky/Quay) inside their own glibc containers, and the `.apk` via a
-`docker run alpine:3.20` step on a glibc host (GitHub's bundled Node20 cannot
-run JS actions inside a musl container, so the build, not the action, runs in
-Alpine). A separate non-container job then downloads all three artifacts and
-attaches them to the GitHub Release in one step.
+The release is organised around the axes that actually change the artifact —
+**package format + libc + libacl variant + arch** — rather than one build per
+distro, because the compiled `why-denied.so` is identical across distros that
+share those axes. The 8-distro test matrix therefore collapses to a small set of
+real artifacts:
+
+| Artifact | Built in | libc | Variant | Serves |
+| -------- | -------- | ---- | ------- | ------ |
+| `…-glibc.deb`        | `debian:12`                       | glibc | libacl | Debian, Ubuntu, Mint, … |
+| `…-glibc.rpm`        | `quay.io/rockylinux/rockylinux:9` | glibc | libacl | Fedora, Rocky, openSUSE, … |
+| `…-glibc-noacl.rpm`  | `ubi9/ubi:9.6`                    | glibc | **`HAVE_LIBACL=0`** | RHEL/UBI (no `libacl-devel`) |
+| `…-musl.apk`         | `alpine:3.20`                     | musl  | libacl | Alpine |
+| `PKGBUILD`           | host (`make pkgbuild`)            | —     | source | Arch (`makepkg -si`) |
+| `…-<version>.tar.gz` | host (`make tarball`)             | —     | source | from-source on anything |
+
+Why this shape:
+
+- **One glibc `.deb`** serves the whole Debian family (all ship `libacl1`).
+- **One glibc libacl `.rpm`** serves Fedora/Rocky/openSUSE: it depends on the
+  `libacl.so.1()(64bit)` SONAME capability, which every RPM family PROVIDES even
+  though they name the package differently (`libacl` vs `libacl5`).
+- **A second, libacl-free `.rpm`** exists only for RHEL/UBI, whose base ships no
+  `libacl-devel`; `docker/Dockerfile.rhel` builds it `HAVE_LIBACL=0`, so the
+  release mirrors that and drops the libacl dependency entirely.
+- **musl gets its own `.apk`** — a musl binary is not interchangeable with the
+  glibc ones. It is built via `docker run alpine:3.20` on a glibc host because
+  GitHub's bundled Node20 cannot run JS actions inside a musl container.
+- **Arch ships a source `PKGBUILD`**, not a binary: `fpm` has no pacman output
+  target, so `makepkg` compiles from the released tarball on the user's machine.
+- Filenames encode format+libc+variant+arch, so artifacts never collide when the
+  publish job flattens them. Builds target **x86_64** (the hosted runner arch);
+  add an arch axis to the matrix to ship more.
+
+A separate non-container job downloads every artifact and attaches them all to
+the GitHub Release in one step.
 
 ---
 

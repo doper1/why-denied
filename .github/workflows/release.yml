@@ -44,11 +44,33 @@ jobs:
         uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
 
   # ------------------------------------------------------------------------
-  # Build the glibc .deb (debian:12) and .rpm (rockylinux:9) packages inside
-  # their own distro containers. These are glibc bases, so GitHub's bundled
-  # Node20 runtime can run the JS actions (checkout, upload-artifact) inside
-  # the container. Each leg only UPLOADS an artifact — publishing to the
-  # release happens later from the non-container `publish` job.
+  # Build the glibc binary packages. We deliberately package by
+  # FORMAT + libc + libacl-VARIANT, NOT one job per distro: the compiled
+  # why-denied.so is byte-for-byte identical across distros that share those
+  # axes, so e.g. a single glibc `.deb` serves Debian/Ubuntu/Mint and a single
+  # glibc libacl `.rpm` serves Fedora/Rocky/openSUSE (they disagree on the
+  # libacl PACKAGE name, but all PROVIDE the libacl.so.1 SONAME the rpm depends
+  # on). The axes that actually change the artifact are:
+  #
+  #   * libc        — glibc vs musl produce incompatible binaries (musl is the
+  #                   separate `build-alpine` job below).
+  #   * libacl      — the default build links libacl; the HAVE_LIBACL=0 build
+  #                   drops it and detects ACLs via xattr instead.
+  #   * format/arch — deb vs rpm packaging; arch is x86_64 here (see PKG_ARCH).
+  #
+  # That collapses the 8-distro test matrix into a SMALL set of real artifacts:
+  #
+  #   deb-glibc         .deb, libacl        -> Debian, Ubuntu, Mint, ...
+  #   rpm-glibc-libacl  .rpm, libacl        -> Fedora, Rocky, openSUSE, ...
+  #   rpm-glibc-noacl   .rpm, HAVE_LIBACL=0 -> RHEL/UBI (ships no libacl-devel;
+  #                                            docker-compose builds it this way)
+  #
+  # Each leg builds inside a glibc container so GitHub's bundled Node20 runtime
+  # can run the JS actions (checkout, upload-artifact) in-container. The
+  # representative image per leg matches an existing docker/Dockerfile.* base.
+  # Packages are renamed with a `-<libc>[-variant]` suffix (PKG_TAG) so the
+  # format+arch fpm name plus this suffix encodes format+libc+variant+arch and
+  # nothing collides when `publish` flattens the artifacts.
   # ------------------------------------------------------------------------
   build-glibc:
     name: Build (${{ matrix.name }})
@@ -61,40 +83,75 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: debian
+          # .deb, glibc, libacl — Debian/Ubuntu family. Built on debian:12.
+          - name: deb-glibc
             image: debian:12
             format: deb
-          - name: rockylinux
-            # Match docker/Dockerfile.rocky: the Docker Hub `rockylinux:9`
-            # image is deprecated and ships a stale dnf cache; the Quay image
-            # is the maintained source and needs no makecache workaround.
+            toolchain: apt
+            pkg_tag: glibc
+          # .rpm, glibc, libacl (default) — Fedora/Rocky/openSUSE. Built on the
+          # maintained Quay Rocky image (Docker Hub `rockylinux:9` is deprecated
+          # and ships a stale dnf cache), matching docker/Dockerfile.rocky.
+          - name: rpm-glibc-libacl
             image: quay.io/rockylinux/rockylinux:9
             format: rpm
+            toolchain: dnf
+            pkg_tag: glibc
+          # .rpm, glibc, libacl-FREE — RHEL/UBI, which ships no libacl-devel.
+          # Built on the genuine Red Hat UBI userspace with HAVE_LIBACL=0 (the
+          # xattr ACL fallback), and emits an rpm with NO libacl dependency
+          # (RPM_DEPENDS=none) since the binary links no libacl at all. This is
+          # the one genuinely distinct second rpm — see docker/Dockerfile.rhel.
+          - name: rpm-glibc-noacl
+            image: registry.access.redhat.com/ubi9/ubi:9.6
+            format: rpm
+            toolchain: dnf
+            have_libacl: "0"
+            rpm_depends: none
+            pkg_tag: glibc-noacl
     container:
       image: ${{ matrix.image }}
+    env:
+      # Default HAVE_LIBACL=1 unless the matrix overrides it (noacl -> 0). An
+      # empty string is falsey in GitHub expressions, so `|| 1` supplies the
+      # default while a literal "0" (non-empty) is preserved.
+      HAVE_LIBACL: ${{ matrix.have_libacl || 1 }}
+      # Forwarded to packager.sh: empty for the libacl legs (keeps the default
+      # libacl SONAME dependency); "none" for the libacl-free rpm.
+      RPM_DEPENDS: ${{ matrix.rpm_depends }}
+      # Filename suffix encoding the libc[+variant] axis (glibc / glibc-noacl).
+      PKG_TAG: ${{ matrix.pkg_tag }}
+      # CPU arch label for the artifact name. The GitHub-hosted runner is
+      # x86_64; add an arch axis to the matrix here if cross-arch is ever built.
+      PKG_ARCH: x86_64
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
-      - name: Install toolchain (Debian/Ubuntu)
-        if: matrix.format == 'deb'
+      - name: Install toolchain (Debian/Ubuntu — apt)
+        if: matrix.toolchain == 'apt'
         run: |
           apt-get update
           apt-get install -y build-essential libacl1-dev ruby ruby-dev rpm
           gem install --no-document fpm
 
-      - name: Install toolchain (RHEL/Rocky/Fedora)
-        if: matrix.format == 'rpm'
+      - name: Install toolchain (RHEL/Rocky/Fedora — dnf)
+        if: matrix.toolchain == 'dnf'
         run: |
-          dnf -y install gcc make libacl-devel rpm-build redhat-rpm-config tar
+          dnf -y install gcc make rpm-build redhat-rpm-config tar
+          # libacl-devel only for the libacl-linked build. UBI/RHEL has no
+          # libacl-devel package, and the HAVE_LIBACL=0 variant does not need it.
+          if [ "${HAVE_LIBACL}" != "0" ]; then dnf -y install libacl-devel; fi
+          # Ruby is a module on RHEL/Rocky (enable a stream); on Fedora it is a
+          # plain package and the module commands simply no-op under `|| true`.
           dnf -y module reset ruby || true
           dnf -y module enable ruby:3.3 || dnf -y module enable ruby:3.1 || true
           dnf -y install ruby ruby-devel
           gem install --no-document fpm
 
       - name: Build shared library
-        run: make all
+        run: make HAVE_LIBACL=${{ env.HAVE_LIBACL }} all
 
       - name: Build ${{ matrix.format }} package
         # Invoke via `bash` so packaging does not depend on the script's
@@ -105,25 +162,31 @@ jobs:
       - name: Upload package artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pkg-${{ matrix.name }}
+          # Artifact name encodes format+libc+variant (matrix.name) + arch.
+          name: pkg-${{ matrix.name }}-${{ env.PKG_ARCH }}
           path: dist/*.${{ matrix.format }}
           if-no-files-found: error
 
   # ------------------------------------------------------------------------
-  # Alpine is musl libc: GitHub's bundled Node20 is glibc-linked and CANNOT
-  # execute inside an `alpine:` container (every JS action — checkout,
-  # upload-artifact — would fail to load its interpreter). So we do NOT use
-  # `container:` here. Instead we check out and upload from the glibc host and
-  # build the .apk via `docker run`, which keeps the JS actions on glibc while
-  # still producing a genuine musl package.
+  # The musl artifact. Alpine earns its OWN build (not just another distro row)
+  # because musl libc produces a binary that is NOT interchangeable with the
+  # glibc packages above — this is the "libc" axis of the format/libc/variant
+  # model. GitHub's bundled Node20 is glibc-linked and CANNOT execute inside an
+  # `alpine:` container (every JS action — checkout, upload-artifact — would
+  # fail to load its interpreter). So we do NOT use `container:` here. Instead
+  # we check out and upload from the glibc host and build the .apk via
+  # `docker run`, which keeps the JS actions on glibc while still producing a
+  # genuine musl package.
   # ------------------------------------------------------------------------
   build-alpine:
-    name: Build (alpine)
+    name: Build (apk-musl)
     needs: release-please
     if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      PKG_ARCH: x86_64
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -138,26 +201,63 @@ jobs:
             apk add --no-cache build-base acl-dev ruby ruby-dev libffi-dev tar bash
             gem install --no-document fpm
             make all
-            bash packager.sh apk
+            # PKG_TAG=musl gives the .apk a distinct -musl asset name, encoding
+            # the libc axis to match the glibc legs (-glibc / -glibc-noacl).
+            PKG_TAG=musl bash packager.sh apk
           '
 
       - name: Upload package artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pkg-alpine
+          name: pkg-apk-musl-${{ env.PKG_ARCH }}
           path: dist/*.apk
           if-no-files-found: error
 
   # ------------------------------------------------------------------------
+  # Source artifacts — the libc-independent leg of the model. Produces:
+  #   * a source tarball (why-denied-<ver>.tar.gz) for from-source installs, and
+  #   * the Arch PKGBUILD (a SOURCE recipe, rendered from packaging/PKGBUILD.in
+  #     with the current version). Arch is shipped as source rather than a
+  #     prebuilt binary because fpm has no pacman output target; `makepkg`
+  #     compiles from the released tarball on the user's machine.
+  # Runs on the plain glibc host — no compiler/fpm needed, just git+tar+sed via
+  # the Makefile targets.
+  # ------------------------------------------------------------------------
+  build-source:
+    name: Build (source + PKGBUILD)
+    needs: release-please
+    if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build source tarball + Arch PKGBUILD
+        run: make tarball pkgbuild
+
+      - name: Upload source artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pkg-source
+          path: |
+            dist/*.tar.gz
+            dist/PKGBUILD
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------------
   # Publish: a single non-container glibc host job that downloads every built
-  # package and attaches all of them (.deb/.rpm/.apk) to the GitHub Release in
-  # one shot. This is the ONLY job that needs `contents: write`, and the only
-  # one that runs softprops/action-gh-release (a JS action that must run on
-  # glibc — another reason it lives outside the alpine container).
+  # artifact and attaches all of them (.deb/.rpm/.apk + source tarball +
+  # PKGBUILD) to the GitHub Release in one shot. This is the ONLY job that needs
+  # `contents: write`, and the only one that runs softprops/action-gh-release (a
+  # JS action that must run on glibc — another reason it lives outside the
+  # alpine container).
   # ------------------------------------------------------------------------
   publish:
     name: Publish packages to release
-    needs: [release-please, build-glibc, build-alpine]
+    needs: [release-please, build-glibc, build-alpine, build-source]
     if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
@@ -169,8 +269,10 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
-          # Flatten the per-leg artifacts (pkg-debian/, pkg-rockylinux/,
-          # pkg-alpine/) into a single dist/ directory.
+          # Flatten every artifact (pkg-deb-glibc-*, pkg-rpm-glibc-libacl-*,
+          # pkg-rpm-glibc-noacl-*, pkg-apk-musl-*, pkg-source) into a single
+          # dist/ directory. The format+arch fpm names plus the PKG_TAG libc
+          # suffix keep filenames unique, so nothing is overwritten on merge.
           merge-multiple: true
 
       - name: Attach packages to release

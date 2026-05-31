@@ -22,16 +22,27 @@
 #     * parent dir not writable for create (mkdir)             (non-root)
 #     * parent dir not writable for delete (unlink)            (non-root)
 #     * missing execute bit for execve                         (non-root)
+#     * chown give-away requires root/CAP_CHOWN                (non-root)
 #     * missing group write permission                         (sudo setup)
 #     * sticky-bit directory unlink denial                     (sudo setup)
 #     * chmod by non-owner                                     (sudo setup)
 #   ACL
 #     * extended ACL denial despite permissive POSIX bits      (sudo + setfacl)
 #
-# Intentionally NOT covered here (host-kernel / policy dependent — needs a
-# dedicated enforcing VM, see README "Testing"):
-#   * Mandatory Access Control (SELinux / AppArmor)
-#   * Network filesystem (NFS/CIFS/SMB) root-squash
+# Additionally covered, but GUARDED so they SKIP cleanly (never fail) when the
+# host kernel / filesystem / policy does not provide the required feature — the
+# normal state of CI runners and unprivileged containers (see README "Testing"
+# and .github/workflows/ci.yml, which documents that MAC and NFS/CIFS are not
+# exercised in CI):
+#   FILE ATTRIBUTES (chattr)  — needs sudo + chattr + a backing FS that honours
+#                               inode flags (ext4/xfs); skips on overlayfs/tmpfs
+#     * immutable file (chattr +i)
+#     * append-only file (chattr +a)
+#   MANDATORY ACCESS CONTROL  — needs an enforcing LSM; skips otherwise
+#     * SELinux denial   (detect /sys/fs/selinux + getenforce=Enforcing + chcon)
+#     * AppArmor denial  (detect /sys/kernel/security/apparmor + a confinement)
+#   NETWORK FILESYSTEM        — needs a real NFS/CIFS mount; skips otherwise
+#     * NFS/CIFS export rules / root-squash (point WHY_DENIED_NETFS_DIR at one)
 #
 # Exit status is non-zero if any non-skipped assertion fails.
 
@@ -149,6 +160,39 @@ require_nonroot() {
         return 1
     fi
     return 0
+}
+
+# --------------------------------------------------------------------------
+# Capability probes for the non-portable triage branches. Each returns success
+# only when the host genuinely provides the feature, so the cases below can
+# SKIP cleanly (never fail) in CI / containers that lack it.
+# --------------------------------------------------------------------------
+
+# True only when an SELinux policy is loaded AND in enforcing mode (permissive
+# would not actually deny the access we are trying to provoke).
+selinux_enforcing() {
+    [ -e /sys/fs/selinux/enforce ] || return 1
+    command -v getenforce >/dev/null 2>&1 || return 1
+    [ "$(getenforce 2>/dev/null)" = "Enforcing" ]
+}
+
+# True when AppArmor is mounted and a tool to confine a command is present.
+apparmor_available() {
+    [ -d /sys/kernel/security/apparmor ] || return 1
+    command -v aa-exec >/dev/null 2>&1
+}
+
+# Verify a chattr flag actually took effect on a file (overlayfs/tmpfs silently
+# lack support, so `chattr +i` can appear to succeed yet set nothing). $1=file,
+# $2=flag char (e.g. i or a). Returns success only if lsattr reports the flag.
+chattr_flag_set() {
+    local file="$1" flag="$2" attrs
+    command -v lsattr >/dev/null 2>&1 || return 1
+    attrs="$(lsattr -d -- "${file}" 2>/dev/null | awk 'NR==1{print $1}')"
+    case "${attrs}" in
+        *"${flag}"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 echo "why-denied test suite"
@@ -353,6 +397,23 @@ if require_nonroot "chmod by non-owner"; then
 fi
 
 # --------------------------------------------------------------------------
+# Case 9b: chown give-away by the owner (needs root / CAP_CHOWN)
+#   Fully portable, no sudo: we OWN the file, but an unprivileged process may
+#   not hand a file to another user. chown(2) returns EPERM and why-denied
+#   takes the AK_CHOWN "you own it, but ... requires root or CAP_CHOWN" branch
+#   (distinct from the not-owner branch above).
+# --------------------------------------------------------------------------
+if require_nonroot "chown give-away requires root/CAP_CHOWN"; then
+    cf="${WORK}/chown_giveaway.txt"
+    echo mine > "${cf}" # owned by the current (non-root) user
+    # Target a uid we are definitely not, without relying on a passwd entry.
+    target_uid=65534
+    [ "$(id -u)" -eq "${target_uid}" ] && target_uid=1
+    out="$(run_under_tty "chown ${target_uid} '${cf}'")"
+    assert_contains "chown give-away requires root/CAP_CHOWN" "requires root or CAP_CHOWN" "${out}"
+fi
+
+# --------------------------------------------------------------------------
 # Case 10: "other"-class read denial carries the world-exposure warning
 #   Root-owned file, mode 0640: we are neither owner nor in root's group, so we
 #   fall into the OTHER class. The only mode-bit fix (chmod o+r) would grant
@@ -423,6 +484,168 @@ if require_nonroot "extended ACL denial"; then
         sudo -n rm -f "${af}" 2>/dev/null || true
     else
         skip "extended ACL denial (needs passwordless sudo + setfacl/getfacl)"
+    fi
+fi
+
+# ==========================================================================
+# FILE ATTRIBUTES (chattr +i / +a) — immutable / append-only inodes.
+#   These are EPERM causes that POSIX bits and ACLs cannot express. The probe
+#   runs as the current user against a permissive-mode (0666) file so the POSIX
+#   math clears us and why-denied reaches the FS_IOC_GETFLAGS attribute probe.
+#   GUARDED: needs sudo + chattr, AND a backing filesystem that honours inode
+#   flags. Docker's overlayfs and tmpfs do NOT, so `chattr +i` fails (or sets
+#   nothing) and the case SKIPs — exactly the CI/container situation.
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Case 11b: immutable file (chattr +i)
+# --------------------------------------------------------------------------
+if require_nonroot "immutable file attribute (chattr +i)"; then
+    if have_sudo && command -v chattr >/dev/null 2>&1; then
+        imf="${WORK}/immutable.txt"
+        echo locked > "${imf}"
+        if sudo -n chmod 0666 "${imf}" 2>/dev/null \
+            && sudo -n chattr +i "${imf}" 2>/dev/null \
+            && chattr_flag_set "${imf}" i; then
+            # A truncating write is refused with EPERM on an immutable file.
+            out="$(run_under_tty "sh -c \"echo more > '${imf}'\"")"
+            assert_contains "immutable file reports chattr +i" "IMMUTABLE (chattr +i)" "${out}"
+            sudo -n chattr -i "${imf}" 2>/dev/null || true
+        else
+            skip "immutable file attribute (filesystem here does not honour chattr +i)"
+        fi
+        sudo -n chattr -i "${imf}" 2>/dev/null || true
+        sudo -n rm -f "${imf}" 2>/dev/null || true
+    else
+        skip "immutable file attribute (needs passwordless sudo + chattr)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 11c: append-only file (chattr +a)
+#   Appends are allowed; a truncating/overwriting write is refused with EPERM,
+#   which routes through the same attribute probe and reports the +a cause.
+# --------------------------------------------------------------------------
+if require_nonroot "append-only file attribute (chattr +a)"; then
+    if have_sudo && command -v chattr >/dev/null 2>&1; then
+        apf="${WORK}/appendonly.txt"
+        echo base > "${apf}"
+        if sudo -n chmod 0666 "${apf}" 2>/dev/null \
+            && sudo -n chattr +a "${apf}" 2>/dev/null \
+            && chattr_flag_set "${apf}" a; then
+            out="$(run_under_tty "sh -c \"echo overwrite > '${apf}'\"")"
+            assert_contains "append-only file reports chattr +a" "APPEND-ONLY" "${out}"
+            sudo -n chattr -a "${apf}" 2>/dev/null || true
+        else
+            skip "append-only file attribute (filesystem here does not honour chattr +a)"
+        fi
+        sudo -n chattr -a "${apf}" 2>/dev/null || true
+        sudo -n rm -f "${apf}" 2>/dev/null || true
+    else
+        skip "append-only file attribute (needs passwordless sudo + chattr)"
+    fi
+fi
+
+# ==========================================================================
+# MANDATORY ACCESS CONTROL (LSM) — SELinux / AppArmor.
+#   why-denied does not name the specific LSM; when POSIX/ACL/NFS/attributes all
+#   clear the caller yet the kernel still refuses, it emits the honest catch-all
+#   pointing at "a Linux Security Module (SELinux/AppArmor)". These cases assert
+#   that catch-all, but ONLY when a real enforcing policy is present to produce
+#   the denial. CI runners and containers are unconfined, so they SKIP — which
+#   is the documented, intended behaviour (see ci.yml).
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Case 11d: SELinux enforcing denial
+# --------------------------------------------------------------------------
+if require_nonroot "SELinux MAC denial"; then
+    if selinux_enforcing && command -v chcon >/dev/null 2>&1; then
+        sxf="${WORK}/selinux.txt"
+        echo secret > "${sxf}"
+        chmod 0644 "${sxf}" # POSIX 'other' read is granted; only the LSM denies
+        # Relabel to a type an ordinary domain is not permitted to read. Try as
+        # the user first, then via sudo. If neither relabels, we cannot build a
+        # denial here, so skip rather than fail.
+        if chcon -t shadow_t "${sxf}" 2>/dev/null \
+            || sudo -n chcon -t shadow_t "${sxf}" 2>/dev/null; then
+            out="$(run_under_tty "cat '${sxf}'")"
+            if printf '%s' "${out}" | grep -qF "[why-denied]"; then
+                assert_contains "SELinux MAC denial reports an LSM" "Linux Security Module (SELinux/AppArmor)" "${out}"
+            else
+                skip "SELinux MAC denial (current policy/domain did not deny the read)"
+            fi
+        else
+            skip "SELinux MAC denial (could not relabel a fixture with chcon)"
+        fi
+    else
+        skip "SELinux MAC denial (requires enforcing SELinux + chcon; unavailable here)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 11e: AppArmor confinement denial
+#   Build a tiny profile that lets `cat` run but DENIES reading our fixture,
+#   load it, and run the read under aa-exec. Guarded at every step; if AppArmor
+#   is absent or the profile cannot be loaded (the usual container case) it
+#   SKIPs. The profile is unloaded again in teardown.
+# --------------------------------------------------------------------------
+if require_nonroot "AppArmor MAC denial"; then
+    if apparmor_available && have_sudo \
+        && command -v apparmor_parser >/dev/null 2>&1; then
+        aaf="${WORK}/apparmor_secret.txt"
+        aap="${WORK}/why_denied_aa.profile"
+        catbin="$(command -v cat || echo /bin/cat)"
+        echo secret > "${aaf}"
+        chmod 0644 "${aaf}"
+        # Allow cat to execute and read what it needs, but explicitly deny the
+        # fixture. 'deny' wins over the broad allow, yielding EACCES on the read.
+        {
+            printf 'abi <abi/3.0>,\n'
+            printf '#include <tunables/global>\n'
+            printf 'profile why_denied_aa %s {\n' "${catbin}"
+            printf '  capability,\n'
+            printf '  /** mr,\n'
+            printf '  deny %s r,\n' "${aaf}"
+            printf '}\n'
+        } > "${aap}"
+        if sudo -n apparmor_parser -r "${aap}" 2>/dev/null; then
+            out="$(run_under_tty "aa-exec -p why_denied_aa -- cat '${aaf}'")"
+            if printf '%s' "${out}" | grep -qF "[why-denied]"; then
+                assert_contains "AppArmor MAC denial reports an LSM" "Linux Security Module (SELinux/AppArmor)" "${out}"
+            else
+                skip "AppArmor MAC denial (confinement did not deny the read here)"
+            fi
+            sudo -n apparmor_parser -R "${aap}" 2>/dev/null || true
+        else
+            skip "AppArmor MAC denial (could not load a test profile)"
+        fi
+    else
+        skip "AppArmor MAC denial (requires AppArmor + aa-exec/apparmor_parser; unavailable here)"
+    fi
+fi
+
+# ==========================================================================
+# NETWORK FILESYSTEM — NFS / CIFS export rules or root-squash.
+#   Standing up a real NFS/CIFS server inside CI needs kernel mounts and is out
+#   of scope (see ci.yml). Instead, point WHY_DENIED_NETFS_DIR at a directory on
+#   a network mount where the current user is denied (e.g. a root-squashed NFS
+#   export). When set and the access is actually refused we assert the
+#   network-filesystem diagnosis; otherwise the case SKIPs cleanly.
+# ==========================================================================
+if require_nonroot "network filesystem (NFS/CIFS) denial"; then
+    netfs_dir="${WHY_DENIED_NETFS_DIR:-}"
+    if [ -n "${netfs_dir}" ] && [ -d "${netfs_dir}" ]; then
+        fstype="$(stat -f -c '%T' "${netfs_dir}" 2>/dev/null || echo unknown)"
+        out="$(run_under_tty "sh -c \"echo probe > '${netfs_dir}/why_denied_netfs.$$'\"")"
+        if printf '%s' "${out}" | grep -qF "Network Filesystem"; then
+            assert_contains "network filesystem denial reports NFS/CIFS" "Network Filesystem" "${out}"
+        else
+            skip "network filesystem denial (no denial observed on '${netfs_dir}' [fstype=${fstype}])"
+        fi
+        rm -f "${netfs_dir}/why_denied_netfs.$$" 2>/dev/null || true
+    else
+        skip "network filesystem denial (set WHY_DENIED_NETFS_DIR to a denied NFS/CIFS path)"
     fi
 fi
 

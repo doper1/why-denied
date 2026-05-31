@@ -32,6 +32,21 @@ DESCRIPTION="Human-readable root-cause analysis for Permission Denied (EACCES/EP
 URL="${URL:-https://github.com/doper1/why-denied}"
 LICENSE="MIT"
 
+# Optional tag appended to the output package FILENAME (not the package
+# metadata). We package by FORMAT + libc + libacl-variant rather than per
+# distro, because the compiled artifact is identical within those axes — so the
+# tag encodes that axis (e.g. "glibc", "glibc-noacl", "musl"), producing names
+# like why-denied_0.1.1_amd64-glibc.deb. Empty => keep fpm's default name.
+# Renaming only affects the asset name, never the package contents.
+PKG_TAG="${PKG_TAG:-}"
+# RPM runtime dependency. Defaults to the libacl SONAME capability, which
+# resolves on every glibc RPM family (RHEL/Rocky/Fedora ship `libacl`, openSUSE
+# ships `libacl5`, but all PROVIDE `libacl.so.1()(64bit)`). Set RPM_DEPENDS=none
+# for the libacl-free build (HAVE_LIBACL=0, e.g. RHEL/UBI which has no
+# libacl-devel): that variant detects ACLs via xattr and links no libacl, so it
+# must NOT carry a libacl dependency.
+RPM_DEPENDS="${RPM_DEPENDS:-libacl.so.1()(64bit)}"
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 STAGE="${ROOT}/dist/stage"
 OUT="${ROOT}/dist"
@@ -79,12 +94,30 @@ fpm_common() {
         -C "${STAGE}"
 }
 
+# Append PKG_TAG to the basename of every freshly built package of extension
+# $1 (the fpm type doubles as the file extension for deb/rpm/apk). Idempotent:
+# files already carrying the tag are skipped. No-op when PKG_TAG is empty.
+tag_output() {
+    local ext="$1" f base
+    [ -n "${PKG_TAG}" ] || return 0
+    for f in "${OUT}"/*."${ext}"; do
+        [ -e "${f}" ] || continue
+        case "${f}" in
+            *"-${PKG_TAG}.${ext}") continue ;;
+        esac
+        base="${f%.${ext}}"
+        mv -f "${f}" "${base}-${PKG_TAG}.${ext}"
+        log "Tagged package -> $(basename "${base}-${PKG_TAG}.${ext}")"
+    done
+}
+
 run_fpm() {
     local type="$1"; shift
     log "Building ${type} package"
     # shellcheck disable=SC2046
     mapfile -d '' common < <(fpm_common)
     fpm -t "${type}" "${common[@]}" "$@" -p "${OUT}/" .
+    tag_output "${type}"
 }
 
 build_deb() { run_fpm deb --depends libacl1; }
@@ -92,7 +125,14 @@ build_deb() { run_fpm deb --depends libacl1; }
 # disagree on the package name (RHEL/Rocky/Fedora ship `libacl`, openSUSE ships
 # `libacl5`), but they all PROVIDE `libacl.so.1()(64bit)`, so this one dependency
 # resolves everywhere. (64-bit targets only; our ARCH is x86_64/aarch64.)
-build_rpm() { run_fpm rpm --depends 'libacl.so.1()(64bit)'; }
+# RPM_DEPENDS=none drops the dependency for the libacl-free HAVE_LIBACL=0 build.
+build_rpm() {
+    if [ "${RPM_DEPENDS}" = "none" ] || [ -z "${RPM_DEPENDS}" ]; then
+        run_fpm rpm
+    else
+        run_fpm rpm --depends "${RPM_DEPENDS}"
+    fi
+}
 # On Alpine the shared library lives in the `libacl` package; `acl` is just the
 # setfacl/getfacl tools. why-denied.so links libacl.so.1, so depend on `libacl`.
 build_apk() { run_fpm apk --depends libacl; }
