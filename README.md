@@ -2,7 +2,7 @@
 
 # 🛡️ why-denied
 
-### Stop guessing. Know *exactly* why your "Permission denied" happened.
+### Stop guessing. Know *exactly* why your "Permission denied" happened
 
 [![Release](https://img.shields.io/github/v/release/why-denied/why-denied?include_prereleases&sort=semver)](https://github.com/why-denied/why-denied/releases)
 [![Release Please](https://img.shields.io/badge/release-please-enabled-brightgreen)](https://github.com/googleapis/release-please)
