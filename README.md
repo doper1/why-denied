@@ -5,7 +5,6 @@
 ### Stop guessing. Know *exactly* why your "Permission denied" happened
 
 [![Release](https://img.shields.io/github/v/release/doper1/why-denied?include_prereleases&sort=semver)](https://github.com/doper1/why-denied/releases)
-[![Release Please](https://img.shields.io/badge/release-please-enabled-brightgreen)](https://github.com/googleapis/release-please)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: C](https://img.shields.io/badge/Language-C-555555.svg?logo=c)](src/why-denied.c)
 
@@ -200,7 +199,10 @@ sudo apk add --allow-untrusted why-denied-0.1.0.apk
 
 Each package installs `why-denied.so` to `/usr/lib/why-denied/` and the activation
 hook to `/etc/profile.d/why-denied.sh`. Open a new interactive shell and you're
-covered.
+covered. The hook re-execs your interactive shell once with the preload already
+active, so the shell instruments **itself** too — failed execs of your own
+scripts (`./deploy.sh`) and your own redirections (`echo x > file`) are
+diagnosed, not just the external commands the shell launches.
 
 ### Manual install from source
 
@@ -435,8 +437,10 @@ shell without the preload.
 > uninstrumented — it would still catch external commands like `cat`, but miss
 > the redirections it performs (`echo > w`) and failed execs of its own children
 > (`./t`). Launching the shell with the preload (as above) instruments the shell
-> itself, which is exactly how the real `profile.d` install behaves: every
-> interactive shell starts already preloaded.
+> itself. This is exactly how the real `profile.d` install behaves: it exports
+> `LD_PRELOAD` and then re-execs the interactive shell once (guarded against
+> looping), so every interactive shell ends up genuinely preloaded — including
+> for its own execs and redirections.
 >
 > The shim also stays silent unless STDERR is a TTY and the user is non-root, so
 > redirecting stderr to a file or running as root shows no `[why-denied]` output
