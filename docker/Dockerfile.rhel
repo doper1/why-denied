@@ -1,0 +1,42 @@
+# why-denied test image — Red Hat Enterprise Linux 9.
+#
+# Built on the freely redistributable Universal Base Image (UBI), which is the
+# genuine RHEL userspace published by Red Hat with no subscription required.
+# glibc, RPM family — complements the Rocky image (a RHEL rebuild) by exercising
+# the actual Red Hat base.
+#
+# Note: UBI does not ship `libacl-devel` (the ACL headers live outside the UBI
+# repo set), so this image builds with HAVE_LIBACL=0 — the libacl-free build
+# that detects ACLs via the POSIX ACL xattr. The `acl` runtime (setfacl/getfacl)
+# IS present, so the ACL test still runs and exercises that fallback path, which
+# the glibc/musl images (built with libacl) do not.
+#
+# Source is mounted at runtime (read-only) at /src; the entrypoint copies it
+# into the writable, tester-owned /work tree so the build + test run as an
+# unprivileged user regardless of the host bind-mount's ownership.
+FROM registry.access.redhat.com/ubi9/ubi:latest
+
+# shadow-utils provides useradd (not always present in the UBI base); `acl`
+# provides setfacl/getfacl for the ACL test fixture.
+RUN dnf -y install \
+        gcc \
+        make \
+        acl \
+        util-linux \
+        shadow-utils \
+        sudo \
+        diffutils \
+    && dnf clean all
+
+# Unprivileged test user with passwordless sudo (permission tests are only
+# meaningful when the prober is NOT root).
+RUN useradd -m tester \
+    && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester \
+    && chmod 0440 /etc/sudoers.d/tester \
+    && mkdir -p /work \
+    && chown tester:tester /work
+
+USER tester
+WORKDIR /work
+
+CMD ["bash", "-c", "cp -r /src/. /work/ && make clean && make HAVE_LIBACL=0 && bash tests/test_denied.sh"]

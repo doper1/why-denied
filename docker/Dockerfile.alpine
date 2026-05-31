@@ -1,0 +1,39 @@
+# why-denied test image — Alpine (musl libc).
+#
+# musl notes:
+#   * -ldl is satisfied by musl's libc (an empty stub libdl is provided), so the
+#     existing LDLIBS work unchanged.
+#   * `script` lives in the util-linux-misc subpackage on Alpine; python3 is
+#     installed as a pty fallback in case it is missing.
+#   * The shell must be bash (the suite uses bash-isms); busybox stat/id provide
+#     the `-c`/name lookups the suite relies on.
+#
+# Source is mounted at runtime (read-only) at /src; the entrypoint copies it
+# into the writable, tester-owned /work tree so the build + test run as an
+# unprivileged user regardless of the host bind-mount's ownership.
+FROM alpine:latest
+
+RUN apk add --no-cache \
+        build-base \
+        libc-dev \
+        acl \
+        acl-dev \
+        util-linux \
+        util-linux-misc \
+        bash \
+        sudo \
+        python3 \
+        shadow
+
+# Unprivileged test user with passwordless sudo (permission tests are only
+# meaningful when the prober is NOT root).
+RUN useradd -m -s /bin/bash tester \
+    && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester \
+    && chmod 0440 /etc/sudoers.d/tester \
+    && mkdir -p /work \
+    && chown tester:tester /work
+
+USER tester
+WORKDIR /work
+
+CMD ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]

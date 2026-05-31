@@ -1,0 +1,16 @@
+# Build artifacts
+*.so
+*.o
+dist/
+
+# Packages
+*.deb
+*.rpm
+*.apk
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/

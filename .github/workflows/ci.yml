@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (cppcheck + clang-format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tooling
+        run: sudo apt-get update && sudo apt-get install -y cppcheck clang-format
+      - name: clang-format (dry run)
+        run: clang-format --dry-run -Werror src/why-denied.c
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,performance,portability \
+                   --error-exitcode=1 --suppress=missingIncludeSystem \
+                   src/why-denied.c
+
+  build:
+    name: Build (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libacl1-dev
+      - name: Build shared library
+        run: make CC=${{ matrix.cc }} all
+      - name: Verify artifact
+        run: file why-denied.so && test -f why-denied.so
+
+  test:
+    # Run the behavioural suite across a glibc/musl distro matrix using the SAME
+    # containers and the SAME command as the local workflow (docker-test.sh ->
+    # docker compose -> "make && bash tests/test_denied.sh"), so that
+    # "works locally == works in CI". Each image creates an unprivileged user
+    # with passwordless sudo, and installs `acl`/`setfacl` so the ACL triage
+    # path is exercised here too.
+    #
+    # NOTE: the Mandatory Access Control branch (SELinux/AppArmor) and the
+    # network-filesystem (NFS/CIFS) branch are intentionally NOT tested in CI —
+    # they depend on host-kernel policy/mounts and require a dedicated enforcing
+    # VM (see README "Testing").
+    name: Test (${{ matrix.distro }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian, rocky, rhel, alpine]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run test suite in ${{ matrix.distro }} container
+        run: bash docker-test.sh ${{ matrix.distro }}

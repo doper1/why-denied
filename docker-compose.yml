@@ -1,0 +1,63 @@
+# why-denied — local, reproducible test matrix across libc/distro families.
+#
+# Each service builds a distro image, mounts this repository read-only at /src,
+# copies it into a writable tester-owned /work tree, then runs:
+#
+#     make && bash tests/test_denied.sh
+#
+# as an unprivileged user (with passwordless sudo for the ownership-forging
+# setup steps). This is the EXACT command CI runs, so "works locally == works
+# in CI".
+#
+# Usage:
+#   docker compose run --rm test-debian
+#   docker compose run --rm test-rocky
+#   docker compose run --rm test-rhel
+#   docker compose run --rm test-alpine
+#
+# Or use the convenience wrapper: ./docker-test.sh [debian|rocky|rhel|alpine|all]
+#
+# Windows (Docker Desktop, PowerShell or Git Bash) works identically, e.g.:
+#   docker compose run --rm test-debian
+
+services:
+  test-debian:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.debian
+    image: why-denied-test-debian
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+
+  test-rocky:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rocky
+    image: why-denied-test-rocky
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
+
+  # RHEL/UBI lacks libacl-devel, so it builds the libacl-free (xattr) variant.
+  test-rhel:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rhel
+    image: why-denied-test-rhel
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make HAVE_LIBACL=0 && bash tests/test_denied.sh"]
+
+  test-alpine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.alpine
+    image: why-denied-test-alpine
+    volumes:
+      - .:/src:ro
+    working_dir: /work
+    command: ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]

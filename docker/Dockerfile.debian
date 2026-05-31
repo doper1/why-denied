@@ -1,0 +1,34 @@
+# why-denied test image — Debian 12 (glibc).
+#
+# Source is mounted at runtime (read-only) at /src; the entrypoint copies it
+# into the writable, tester-owned /work tree so the build + test run as an
+# unprivileged user regardless of the host bind-mount's ownership.
+FROM debian:12
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        libacl1-dev \
+        acl \
+        cppcheck \
+        clang-format \
+        util-linux \
+        bsdutils \
+        sudo \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged test user with passwordless sudo (permission tests are only
+# meaningful when the prober is NOT root).
+RUN useradd -m -s /bin/bash tester \
+    && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester \
+    && chmod 0440 /etc/sudoers.d/tester \
+    && mkdir -p /work \
+    && chown tester:tester /work
+
+USER tester
+WORKDIR /work
+
+CMD ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]

@@ -1,0 +1,16 @@
+# Linux-kernel-flavoured C style, adapted for an 80-column userspace library.
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 80
+BreakBeforeBraces: Linux
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+IndentCaseLabels: false
+PointerAlignment: Right
+SpaceAfterCStyleCast: false
+AlignConsecutiveAssignments: false
+SortIncludes: true
+KeepEmptyLinesAtTheStartOfBlocks: false

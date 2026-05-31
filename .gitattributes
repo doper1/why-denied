@@ -1,0 +1,14 @@
+# Enforce LF line endings for everything checked out on any OS so that
+# shell scripts, Makefiles and Dockerfiles always run correctly on Linux
+# (Windows CRLF endings break bash with `$'\r'` / parse errors).
+* text=auto eol=lf
+
+# Files that MUST be LF regardless of platform.
+*.sh    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+Makefile        text eol=lf
+Dockerfile*     text eol=lf
+.clang-format   text eol=lf

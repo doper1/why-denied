@@ -1,0 +1,29 @@
+# why-denied test image — Rocky Linux 9 (glibc, RPM family).
+#
+# Source is mounted at runtime (read-only) at /src; the entrypoint copies it
+# into the writable, tester-owned /work tree so the build + test run as an
+# unprivileged user regardless of the host bind-mount's ownership.
+FROM quay.io/rockylinux/rockylinux:9
+
+RUN dnf -y install \
+        gcc \
+        make \
+        libacl-devel \
+        acl \
+        util-linux \
+        sudo \
+        diffutils \
+    && dnf clean all
+
+# Unprivileged test user with passwordless sudo (permission tests are only
+# meaningful when the prober is NOT root).
+RUN useradd -m tester \
+    && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester \
+    && chmod 0440 /etc/sudoers.d/tester \
+    && mkdir -p /work \
+    && chown tester:tester /work
+
+USER tester
+WORKDIR /work
+
+CMD ["bash", "-c", "cp -r /src/. /work/ && make clean && make && bash tests/test_denied.sh"]
