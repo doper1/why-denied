@@ -47,13 +47,13 @@
 
 /* Filesystem magic numbers (from <linux/magic.h>); hard-coded so the library
  * builds on toolchains where that header is unavailable. */
-#define WD_NFS_SUPER_MAGIC   0x6969UL
-#define WD_SMB_SUPER_MAGIC   0x517BUL
+#define WD_NFS_SUPER_MAGIC 0x6969UL
+#define WD_SMB_SUPER_MAGIC 0x517BUL
 #define WD_CIFS_MAGIC_NUMBER 0xFF534D42UL
 #define WD_SMB2_MAGIC_NUMBER 0xFE534D42UL
-#define WD_FUSE_SUPER_MAGIC  0x65735546UL
-#define WD_9P_MAGIC          0x01021997UL
-#define WD_AFS_SUPER_MAGIC   0x5346414FUL
+#define WD_FUSE_SUPER_MAGIC 0x65735546UL
+#define WD_9P_MAGIC 0x01021997UL
+#define WD_AFS_SUPER_MAGIC 0x5346414FUL
 
 /* -------------------------------------------------------------------------
  * Global state (intentionally minimal).
@@ -72,12 +72,12 @@ static __thread int g_in_inspect = 0;
  * ---------------------------------------------------------------------- */
 
 enum access_kind {
-    AK_READ,     /* needs read bit on the target file */
-    AK_WRITE,    /* needs write bit on the target (or create into parent) */
-    AK_EXEC,     /* needs execute bit on the target file */
-    AK_CREATE,   /* needs write + search on the parent directory */
-    AK_DELETE,   /* like CREATE, plus sticky-bit consideration */
-    AK_OWNER_OP  /* chmod/chown: requires ownership (or root) */
+    AK_READ,    /* needs read bit on the target file */
+    AK_WRITE,   /* needs write bit on the target (or create into parent) */
+    AK_EXEC,    /* needs execute bit on the target file */
+    AK_CREATE,  /* needs write + search on the parent directory */
+    AK_DELETE,  /* like CREATE, plus sticky-bit consideration */
+    AK_OWNER_OP /* chmod/chown: requires ownership (or root) */
 };
 
 /* -------------------------------------------------------------------------
@@ -93,7 +93,8 @@ static int (*real_open64)(const char *, int, ...);
 static int (*real_openat64)(int, const char *, int, ...);
 static int (*real_creat64)(const char *, mode_t);
 static int (*real_execve)(const char *, char *const[], char *const[]);
-static int (*real_execveat)(int, const char *, char *const[], char *const[], int);
+static int (*real_execveat)(int, const char *, char *const[], char *const[],
+                            int);
 static int (*real_mkdir)(const char *, mode_t);
 static int (*real_mkdirat)(int, const char *, mode_t);
 static int (*real_rmdir)(const char *);
@@ -120,8 +121,9 @@ static void resolve_sym(void **slot, const char *name)
 
 #define ENSURE(ptr, name)                                                      \
     do {                                                                       \
-        if (__builtin_expect(__atomic_load_n((void **)&(ptr),                  \
-                                             __ATOMIC_ACQUIRE) == NULL, 0)) {  \
+        if (__builtin_expect(                                                  \
+                __atomic_load_n((void **)&(ptr), __ATOMIC_ACQUIRE) == NULL,    \
+                0)) {                                                          \
             resolve_sym((void **)&(ptr), (name));                              \
         }                                                                      \
     } while (0)
@@ -197,7 +199,9 @@ static int class_bits(const struct stat *st, int cls)
 
 static const char *class_word(int cls)
 {
-    return cls == CLASS_OWNER ? "owner" : cls == CLASS_GROUP ? "group" : "other";
+    return cls == CLASS_OWNER   ? "owner"
+           : cls == CLASS_GROUP ? "group"
+                                : "other";
 }
 
 static char class_char(int cls)
@@ -217,7 +221,8 @@ static char class_char(int cls)
  *    discovered via /proc/self/fd/<dirfd>.
  *  - If anything is unresolvable we degrade gracefully to the raw path.
  */
-static const char *resolve_at(int dirfd, const char *path, char *buf, size_t bufsz)
+static const char *resolve_at(int dirfd, const char *path, char *buf,
+                              size_t bufsz)
 {
     if (path == NULL || path[0] == '/' || dirfd == AT_FDCWD)
         return path;
@@ -323,7 +328,8 @@ static void advanced_triage(const char *path)
 {
     if (has_extended_acl(path)) {
         emitf("Blocked by Extended Access Control List (ACLs). "
-              "Inspect with 'getfacl %s'.", path);
+              "Inspect with 'getfacl %s'.",
+              path);
         return;
     }
 
@@ -525,11 +531,20 @@ static void analyze_denial(const char *path, enum access_kind kind)
             const char *verb, *permword;
             char permchar;
             if (kind == AK_READ) {
-                want = 4; verb = "READ from"; permword = "read"; permchar = 'r';
+                want = 4;
+                verb = "READ from";
+                permword = "read";
+                permchar = 'r';
             } else if (kind == AK_WRITE) {
-                want = 2; verb = "WRITE to"; permword = "write"; permchar = 'w';
+                want = 2;
+                verb = "WRITE to";
+                permword = "write";
+                permchar = 'w';
             } else {
-                want = 1; verb = "EXECUTE"; permword = "execute"; permchar = 'x';
+                want = 1;
+                verb = "EXECUTE";
+                permword = "execute";
+                permchar = 'x';
             }
 
             if (!(bits & want)) {
@@ -596,8 +611,8 @@ done:
             if ((_e == EACCES || _e == EPERM) && !g_in_inspect) {              \
                 g_in_inspect = 1;                                              \
                 char _rb[PATH_MAX];                                            \
-                const char *_rp = resolve_at((dirfd), (path), _rb,             \
-                                             sizeof _rb);                      \
+                const char *_rp =                                              \
+                    resolve_at((dirfd), (path), _rb, sizeof _rb);              \
                 analyze_denial(_rp, (kind));                                   \
                 g_in_inspect = 0;                                              \
             }                                                                  \
@@ -635,14 +650,15 @@ int open(const char *pathname, int flags, ...)
     if (flags & (O_CREAT | O_TMPFILE)) {
         va_list ap;
         va_start(ap, flags);
-        mode = (mode_t)va_arg(ap, int); /* mode_t is promoted to int in varargs */
+        mode =
+            (mode_t)va_arg(ap, int); /* mode_t is promoted to int in varargs */
         va_end(ap);
     }
 
     ENSURE(real_open, "open");
     int ret = real_open(pathname, flags, mode);
 
-    enum access_kind kind = (flags & O_CREAT)              ? AK_WRITE
+    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
                             : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
                                                             : AK_READ;
     INSPECT(pathname, kind);
@@ -662,7 +678,7 @@ int openat(int dirfd, const char *pathname, int flags, ...)
     ENSURE(real_openat, "openat");
     int ret = real_openat(dirfd, pathname, flags, mode);
 
-    enum access_kind kind = (flags & O_CREAT)              ? AK_WRITE
+    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
                             : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
                                                             : AK_READ;
     INSPECT_AT(dirfd, pathname, kind);
@@ -693,7 +709,7 @@ int open64(const char *pathname, int flags, ...)
     ENSURE(real_open64, "open64");
     int ret = real_open64(pathname, flags, mode);
 
-    enum access_kind kind = (flags & O_CREAT)              ? AK_WRITE
+    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
                             : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
                                                             : AK_READ;
     INSPECT(pathname, kind);
@@ -713,7 +729,7 @@ int openat64(int dirfd, const char *pathname, int flags, ...)
     ENSURE(real_openat64, "openat64");
     int ret = real_openat64(dirfd, pathname, flags, mode);
 
-    enum access_kind kind = (flags & O_CREAT)              ? AK_WRITE
+    enum access_kind kind = (flags & O_CREAT)               ? AK_WRITE
                             : (flags & (O_WRONLY | O_RDWR)) ? AK_WRITE
                                                             : AK_READ;
     INSPECT_AT(dirfd, pathname, kind);
