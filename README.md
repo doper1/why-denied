@@ -204,12 +204,29 @@ covered.
 
 ### Manual install from source
 
+First install the build prerequisites (a C compiler, `make`, and the `libacl`
+development headers):
+
+```bash
+# Debian / Ubuntu / Raspberry Pi OS
+sudo apt install -y build-essential libacl1-dev
+
+# RHEL / Rocky / Fedora
+sudo dnf install -y gcc make libacl-devel
+
+# Alpine
+sudo apk add build-base acl-dev
+```
+
 ```bash
 git clone https://github.com/doper1/why-denied.git
 cd why-denied
 make
 sudo make install        # -> /usr/lib/why-denied/why-denied.so + /etc/profile.d hook
 ```
+
+> No `libacl` available? Build the dependency-free variant, which detects ACLs
+> via the POSIX ACL xattr instead: `make HAVE_LIBACL=0 && sudo make install`.
 
 ### Ad-hoc, no install (single command or session)
 

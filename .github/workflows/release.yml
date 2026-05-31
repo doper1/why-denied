@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     branches: [main]
+  # Manual trigger to (re)build and attach packages to an existing release tag,
+  # e.g. to backfill artifacts onto a release whose packaging run failed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build packages for (e.g. v0.1.0)"
+        required: true
 
 permissions:
   contents: write
@@ -12,27 +19,31 @@ jobs:
   # ------------------------------------------------------------------------
   # release-please maintains an ongoing "Release PR". Merging it tags a new
   # release and sets release_created=true, which gates the packaging job.
+  #
+  # Configuration lives in release-please-config.json and
+  # .release-please-manifest.json (manifest mode is the v4 default; the
+  # config-file / manifest-file inputs default to those paths).
   # ------------------------------------------------------------------------
   release-please:
     name: Release PR / tag
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
-        uses: google-github-actions/release-please-action@v4
-        with:
-          release-type: simple
+        uses: googleapis/release-please-action@v4
 
   # ------------------------------------------------------------------------
   # Build native packages on each target distro using its own container, then
-  # upload them to the freshly-created GitHub Release.
+  # upload them to the GitHub Release. Runs when release-please cut a release,
+  # or when manually dispatched against an existing tag.
   # ------------------------------------------------------------------------
   packages:
     name: Package (${{ matrix.name }})
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -49,6 +60,8 @@ jobs:
             format: apk
     container:
       image: ${{ matrix.image }}
+    env:
+      TAG: ${{ github.event.inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,14 +91,8 @@ jobs:
         run: ./packager.sh ${{ matrix.format }}
 
       - name: Upload package to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          # gh may be absent in minimal containers; install when missing.
-          if ! command -v gh >/dev/null 2>&1; then
-            ( apt-get install -y gh 2>/dev/null ) || \
-            ( dnf install -y gh 2>/dev/null ) || \
-            ( apk add --no-cache github-cli 2>/dev/null ) || true
-          fi
-          gh release upload "${TAG}" dist/*.${{ matrix.format }} --clobber
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*.${{ matrix.format }}
+          fail_on_unmatched_files: true
