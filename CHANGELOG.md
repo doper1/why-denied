@@ -4,6 +4,18 @@ All notable changes to this project are documented here. This file is
 maintained automatically by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [0.2.0](https://github.com/doper1/why-denied/compare/why-denied-v0.1.1...why-denied-v0.2.0) (2026-05-31)
+
+
+### Features
+
+* improvements and more distors ([2633cd0](https://github.com/doper1/why-denied/commit/2633cd09b565c07f8bd260c31b8a47503f540d2c))
+
+
+### Bug Fixes
+
+* package creation ([6262ea9](https://github.com/doper1/why-denied/commit/6262ea93edec4f50106a18ece8c13305ee28c635))
+
 ## [0.1.1](https://github.com/doper1/why-denied/compare/why-denied-v0.1.0...why-denied-v0.1.1) (2026-05-31)
 
 
