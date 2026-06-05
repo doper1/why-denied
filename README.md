@@ -29,6 +29,7 @@ gets blocked.
 - [Intercepted Syscalls](#intercepted-syscalls)
 - [Installation](#installation)
 - [Usage & Sample Output](#usage--sample-output)
+- [CLI tool](#cli-tool)
 - [Building from Source](#building-from-source)
 - [Testing](#testing)
 - [Packaging](#packaging)
@@ -85,7 +86,7 @@ flowchart TD
     B --> C[Call REAL libc function via dlsym RTLD_NEXT]
     C --> D{ret == -1 AND errno in EACCES/EPERM?}
     D -- no --> E[Return immediately - zero overhead]
-    D -- yes --> F{Interactive TTY? reentrancy clear?}
+    D -- yes --> F{TTY or ENABLE or service-mode? reentrancy clear?}
     F -- no --> E
     F -- yes --> G[analyze_denial - read-only probing]
     G --> H["Print '[why-denied] ...' to STDERR"]
@@ -101,10 +102,11 @@ Three properties make this safe to leave loaded everywhere:
    (e.g. we can't `stat()` the parent) simply yields silence — never a behaviour
    change.
 
-2. **TTY gating.** At load time the constructor checks `isatty(STDERR_FILENO)`.
-   If STDERR isn't a terminal (daemons, cron, build pipelines, containers
-   without a console), a global flag turns every wrapper into a pure
-   pass-through. You can also force-disable with `WHY_DENIED_DISABLE=1`.
+2. **TTY gating (with opt-in overrides).** By default the constructor engages
+   only when `isatty(STDERR_FILENO)`. Set `WHY_DENIED_ENABLE=1` (or create
+   `/etc/why-denied/service-mode` via `why-denied enable global`) to diagnose
+   non-interactive workloads such as systemd units and cron jobs. Force silence
+   with `WHY_DENIED_DISABLE=1`.
 
 3. **Reentrancy guard.** A `__thread`-local flag prevents infinite recursion if
    any function we call during analysis is itself one of the intercepted
@@ -230,12 +232,15 @@ sudo apk add --allow-untrusted why-denied-<version>-musl.apk
 > **From source on anything else:** each release also attaches a plain source
 > tarball, `why-denied-<version>.tar.gz`.
 
-Each package installs `why-denied.so` to `/usr/lib/why-denied/` and the activation
-hook to `/etc/profile.d/why-denied.sh`. Open a new interactive shell and you're
-covered. The hook re-execs your interactive shell once with the preload already
-active, so the shell instruments **itself** too — failed execs of your own
-scripts (`./deploy.sh`) and your own redirections (`echo x > file`) are
-diagnosed, not just the external commands the shell launches.
+Each package installs `why-denied.so` to `/usr/lib/why-denied/`, the
+`/usr/bin/why-denied` CLI, and the activation hook to
+`/etc/profile.d/why-denied.sh`. Open a new interactive shell and you're covered,
+or use the CLI for ad-hoc runs and scoped enable/disable (see
+[CLI tool](#cli-tool)). The
+hook re-execs your interactive shell once with the preload already active, so the
+shell instruments **itself** too — failed execs of your own scripts
+(`./deploy.sh`) and your own redirections (`echo x > file`) are diagnosed, not
+just the external commands the shell launches.
 
 ### Manual install from source
 
@@ -263,7 +268,7 @@ sudo apk add build-base acl-dev
 git clone https://github.com/doper1/why-denied.git
 cd why-denied
 make
-sudo make install        # -> /usr/lib/why-denied/why-denied.so + /etc/profile.d hook
+sudo make install        # -> .so + /usr/bin/why-denied + /etc/profile.d hook
 ```
 
 > **Arch Linux (no native package):** `make && sudo make install` is the
@@ -278,11 +283,14 @@ sudo make install        # -> /usr/lib/why-denied/why-denied.so + /etc/profile.d
 ### Ad-hoc, no install (single command or session)
 
 ```bash
-# One command:
+# One command (manual):
 LD_PRELOAD=./why-denied.so cat /etc/shadow
 
 # Whole current shell:
 export LD_PRELOAD="$PWD/why-denied.so"
+
+# Equivalent via CLI:
+WHY_DENIED_SO=./why-denied.so ./bin/why-denied run cat /etc/shadow
 ```
 
 ---
@@ -334,6 +342,133 @@ To temporarily silence it: `WHY_DENIED_DISABLE=1 <command>`.
 
 ---
 
+## CLI tool
+
+`why-denied` is a POSIX shell command (`/usr/bin/why-denied`) that wraps the
+scattered `LD_PRELOAD` / env-var knobs into one reversible interface. The
+default install still auto-activates interactive shells via `profile.d`; the CLI
+is additive — use it to experiment, debug a single command, or temporarily widen
+diagnostics to systemd units and cron jobs.
+
+### Environment variables
+
+| Variable | Set by | Effect |
+| -------- | ------ | ------ |
+| `LD_PRELOAD` | CLI / `profile.d` / manual | Loads `why-denied.so` at process start |
+| `WHY_DENIED_ENABLE=1` | CLI `run` / `enable` | Engage on `EACCES`/`EPERM` even when STDERR is not a TTY |
+| `WHY_DENIED_DISABLE=1` | CLI `disable` / manual | Force silence; wins over `WHY_DENIED_ENABLE` |
+| `WHY_DENIED_SO` | dev / tests | Override path to the `.so` (default `/usr/lib/why-denied/why-denied.so`) |
+| `WHY_DENIED_REEXEC` | `profile.d` / `shell` | Internal guard against re-exec loops |
+
+### Command reference
+
+```text
+why-denied status              # report library path, scope, env overrides
+why-denied run  [--] <cmd…>    # one-shot: preload + enable, then exec
+why-denied try  <path>         # smoke-test: cat a path under preload
+why-denied shell               # start a preloaded interactive login shell
+
+why-denied enable  [scope]     # turn on (default scope: session)
+why-denied disable [scope]     # turn off (default scope: session)
+why-denied help                # usage summary (-h and --help also work)
+
+man why-denied                 # full manual (after install)
+```
+
+**Scopes** for `enable` / `disable`:
+
+| Scope | Privilege | What changes |
+| ----- | --------- | ------------ |
+| `session` (default) | user | prints `export`/`unset` lines for `eval` in your shell |
+| `service` | root | writes/removes `/etc/systemd/system.conf.d/why-denied.conf` |
+| `global` | root | touches/removes `/etc/why-denied/service-mode` marker |
+
+Because a child process cannot modify its parent’s environment, **session scope
+prints shell snippets** rather than mutating your shell directly:
+
+```bash
+eval "$(why-denied enable session)"
+eval "$(why-denied disable session)"
+```
+
+### Usage examples
+
+**Try a denial in the current terminal**
+
+```bash
+why-denied run cat /etc/shadow
+why-denied try /etc/shadow          # shorthand for the above
+```
+
+**Debug a script once (works in pipes, cron, and journald via `WHY_DENIED_ENABLE`)**
+
+```bash
+why-denied run -- ./deploy.sh
+```
+
+**Start a preloaded shell (dev tree or no `profile.d`)**
+
+```bash
+WHY_DENIED_SO=./why-denied.so why-denied shell
+```
+
+**Inspect current state**
+
+```bash
+why-denied status
+```
+
+**Enable diagnostics for systemd services (troubleshooting window)**
+
+```bash
+sudo why-denied enable service
+sudo systemctl daemon-reload
+sudo systemctl restart myunit.service
+journalctl -u myunit.service -f    # [why-denied] lines appear on STDERR
+
+sudo why-denied disable service
+sudo systemctl daemon-reload
+```
+
+**Cron**
+
+```cron
+0 2 * * * /usr/bin/why-denied run /usr/local/bin/backup.sh
+```
+
+Or set the env vars in the crontab:
+
+```cron
+WHY_DENIED_ENABLE=1
+LD_PRELOAD=/usr/lib/why-denied/why-denied.so
+0 2 * * * /usr/local/bin/backup.sh
+```
+
+**Per-unit drop-in (surgical alternative to `enable service`)**
+
+```ini
+[Service]
+Environment=LD_PRELOAD=/usr/lib/why-denied/why-denied.so
+Environment=WHY_DENIED_ENABLE=1
+```
+
+`enable service` writes the manager-level `DefaultEnvironment=…` drop-in so
+every *restarted* unit inherits the preload. Prefer a per-unit drop-in when only
+one service needs instrumentation.
+
+### Install layout
+
+```text
+/usr/bin/why-denied                        # POSIX sh CLI
+/usr/share/man/man1/why-denied.1           # manual page
+/usr/lib/why-denied/why-denied.so          # shared library
+/etc/profile.d/why-denied.sh               # interactive hook
+/etc/why-denied/service-mode               # optional global non-TTY marker
+/etc/systemd/system.conf.d/why-denied.conf # written by `enable service`
+```
+
+---
+
 ## Building from Source
 
 Requirements: a C compiler (`gcc` or `clang`), `make`, and `libacl` headers
@@ -342,7 +477,7 @@ Requirements: a C compiler (`gcc` or `clang`), `make`, and `libacl` headers
 ```bash
 make                 # builds why-denied.so (-O3 -Wall -Wextra -fPIC -shared)
 make HAVE_LIBACL=0   # build without the libacl dependency (xattr fallback)
-make test            # run the behavioural test suite under a PTY
+make test            # run test_denied.sh + test_cli.sh
 make lint            # cppcheck
 make format          # clang-format -i
 make clean
@@ -359,12 +494,17 @@ cc -O3 -Wall -Wextra -fPIC -DHAVE_LIBACL=1 -shared \
 
 ## Testing
 
-The behavioural suite (`tests/test_denied.sh`) creates restrictive fixtures and
-asserts the exact `[why-denied] …` diagnostic each one produces. Because the
-library only engages when STDERR is a TTY, every probe runs inside a
-pseudo-terminal (util-linux `script`, with a `python3` pty fallback). Probes run
-as the **current, unprivileged** user — root bypasses POSIX checks — and cases
-that must forge foreign ownership use passwordless `sudo` for *setup only*,
+Two behavioural suites run under `make test`:
+
+- `tests/test_denied.sh` — library triage branches and gating (`WHY_DENIED_ENABLE`,
+  `WHY_DENIED_DISABLE`, non-TTY silence).
+- `tests/test_cli.sh` — the `/usr/bin/why-denied` CLI (`run`, `try`, `enable` /
+  `disable` scopes).
+
+Because the default library gate engages on a TTY, most denial probes run inside
+a pseudo-terminal (util-linux `script`, with a `python3` pty fallback). Probes
+run as the **current, unprivileged** user — root bypasses POSIX checks — and
+cases that must forge foreign ownership use passwordless `sudo` for *setup only*,
 self-skipping with a clear message when a capability is missing.
 
 ### Quick start
@@ -382,7 +522,7 @@ The suite prints a `PASS / FAIL / SKIP` summary and exits non-zero on any FAIL.
 | **Standard POSIX** | missing owner read; missing dir execute/search; missing owner write; parent not writable for create (`mkdir`); parent not writable for delete (`unlink`); missing execute bit for `execve`; create file in read-only dir; `rmdir` in read-only parent; deep-ancestor search denial | non-root |
 | **Standard POSIX** | missing **group** write; **sticky-bit** unlink denial; **chmod** by non-owner; **other**-class read & search denials → carry the world-exposure warning | non-root probe, `sudo` setup |
 | **ACL** | extended ACL (`setfacl`) denial despite permissive POSIX bits → `Blocked by Extended Access Control List (ACLs)` | non-root probe, `sudo` + `setfacl` setup |
-| **Gating / safety** | silent on successful access (no false positives); `WHY_DENIED_DISABLE` escape hatch; silent when STDERR is not a TTY | non-root |
+| **Gating / safety** | silent on successful access (no false positives); `WHY_DENIED_DISABLE` escape hatch; silent when STDERR is not a TTY; `WHY_DENIED_ENABLE` override | non-root |
 
 **Intentionally excluded from the automated suite / CI** (host-kernel & mount
 dependent — they need a dedicated **enforcing VM**, not a container):
@@ -392,7 +532,7 @@ dependent — they need a dedicated **enforcing VM**, not a container):
 
 ### Docker matrix (local — mirrors CI exactly)
 
-The same command CI runs (`make && bash tests/test_denied.sh`) is executed
+The same command CI runs (`make test`) is executed
 across a glibc **and** musl distro matrix, as an unprivileged user with
 passwordless sudo:
 
@@ -604,8 +744,10 @@ the GitHub Release in one step.
   so `why-denied` cannot be used to influence privileged programs — by design we
   never ship or rely on any setuid component.
 - **Interactive-only by default.** The `/etc/profile.d` hook activates the shim
-  only when `[ -t 1 ]` (a terminal), and the library re-checks
-  `isatty(STDERR_FILENO)` at load. Service managers, cron and CI never load it.
+  only when `[ -t 1 ]` (a terminal), and the library engages on a TTY unless
+  explicitly opted in via `WHY_DENIED_ENABLE`, `why-denied enable global`, or
+  `why-denied enable service`. Disable service/global scopes after debugging —
+  non-TTY diagnostics can add noise to journald and cron mail.
 - **Read-only and fail-safe.** The analysis path performs only `stat`/`statfs`/
   `getgroups`/`readlink`/ACL reads. It cannot modify files and cannot change the
   observed `errno` or return value. Any internal error degrades to silence.

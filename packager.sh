@@ -4,6 +4,8 @@
 # using fpm (https://github.com/jordansissel/fpm).
 #
 # It assembles a staging tree that mirrors the install layout:
+#   /usr/bin/why-denied
+#   /usr/share/man/man1/why-denied.1
 #   /usr/lib/why-denied/why-denied.so
 #   /etc/profile.d/why-denied.sh
 # and then asks fpm to emit one or more package formats from that tree.
@@ -71,6 +73,11 @@ fi
 stage() {
     log "Staging files into ${STAGE}"
     rm -rf "${STAGE}"
+    install -d "${STAGE}/usr/bin"
+    install -m 0755 "${ROOT}/bin/why-denied" "${STAGE}/usr/bin/why-denied"
+    install -d "${STAGE}/usr/share/man/man1"
+    install -m 0644 "${ROOT}/man/why-denied.1" \
+        "${STAGE}/usr/share/man/man1/why-denied.1"
     install -d "${STAGE}/usr/lib/why-denied"
     install -m 0644 "${TARGET_SO}" "${STAGE}/usr/lib/why-denied/why-denied.so"
     install -d "${STAGE}/etc/profile.d"

@@ -689,6 +689,30 @@ if require_nonroot "silent when STDERR is not a TTY"; then
     chmod 600 "${nf}"
 fi
 
+# --------------------------------------------------------------------------
+# Case 15: WHY_DENIED_ENABLE engages even when STDERR is not a TTY
+# --------------------------------------------------------------------------
+if require_nonroot "WHY_DENIED_ENABLE non-TTY override"; then
+    nf="${WORK}/enable-notty.txt"
+    echo secret > "${nf}"
+    chmod 000 "${nf}"
+    out="$(WHY_DENIED_ENABLE=1 LD_PRELOAD="${SO}" cat "${nf}" 2>&1 || true)"
+    assert_contains "WHY_DENIED_ENABLE enables non-TTY diagnostics" "[why-denied]" "${out}"
+    chmod 600 "${nf}"
+fi
+
+# --------------------------------------------------------------------------
+# Case 16: WHY_DENIED_DISABLE wins over WHY_DENIED_ENABLE
+# --------------------------------------------------------------------------
+if require_nonroot "WHY_DENIED_DISABLE wins over ENABLE"; then
+    nf="${WORK}/disable-enable.txt"
+    echo secret > "${nf}"
+    chmod 000 "${nf}"
+    out="$(WHY_DENIED_ENABLE=1 WHY_DENIED_DISABLE=1 LD_PRELOAD="${SO}" cat "${nf}" 2>&1 || true)"
+    assert_not_contains "WHY_DENIED_DISABLE wins over ENABLE" "[why-denied]" "${out}"
+    chmod 600 "${nf}"
+fi
+
 # ==========================================================================
 # Summary
 # ==========================================================================

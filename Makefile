@@ -6,8 +6,12 @@
 
 CC      ?= cc
 PREFIX  ?= /usr
+BINDIR  ?= $(PREFIX)/bin
+MANDIR  ?= $(PREFIX)/share/man
 LIBDIR  ?= $(PREFIX)/lib/why-denied
 PROFILED ?= /etc/profile.d
+CLI     := bin/why-denied
+MANPAGE := man/why-denied.1
 
 # Build the ACL backend by default.
 HAVE_LIBACL ?= 1
@@ -38,21 +42,28 @@ all: $(TARGET)
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
-# Install the shared library and the interactive-session profile hook.
+# Install the shared library, CLI, and the interactive-session profile hook.
 install: $(TARGET)
 	install -d $(DESTDIR)$(LIBDIR)
 	install -m 0644 $(TARGET) $(DESTDIR)$(LIBDIR)/$(TARGET)
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 0755 $(CLI) $(DESTDIR)$(BINDIR)/why-denied
+	install -d $(DESTDIR)$(MANDIR)/man1
+	install -m 0644 $(MANPAGE) $(DESTDIR)$(MANDIR)/man1/why-denied.1
 	install -d $(DESTDIR)$(PROFILED)
 	install -m 0644 profile.d/why-denied.sh $(DESTDIR)$(PROFILED)/why-denied.sh
-	@echo "Installed. Open a new interactive shell or 'source $(PROFILED)/why-denied.sh'."
+	@echo "Installed. Open a new interactive shell, run 'why-denied status', or 'source $(PROFILED)/why-denied.sh'."
 
 uninstall:
 	rm -f $(DESTDIR)$(LIBDIR)/$(TARGET)
+	rm -f $(DESTDIR)$(BINDIR)/why-denied
+	rm -f $(DESTDIR)$(MANDIR)/man1/why-denied.1
 	rm -f $(DESTDIR)$(PROFILED)/why-denied.sh
 	-rmdir $(DESTDIR)$(LIBDIR) 2>/dev/null || true
 
 test: $(TARGET)
 	WHY_DENIED_SO="$(CURDIR)/$(TARGET)" bash tests/test_denied.sh
+	WHY_DENIED_SO="$(CURDIR)/$(TARGET)" WHY_DENIED_CLI="$(CURDIR)/$(CLI)" bash tests/test_cli.sh
 
 packages: $(TARGET)
 	./packager.sh all

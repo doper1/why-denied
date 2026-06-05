@@ -34,7 +34,7 @@ build() {
 
 package() {
     cd "${pkgname}-${pkgver}"
-    # Installs why-denied.so to /usr/lib/why-denied and the profile.d hook,
+    # Installs why-denied.so, /usr/bin/why-denied, and the profile.d hook,
     # exactly like the packaged distros (PREFIX defaults to /usr).
     make install DESTDIR="${pkgdir}"
 }

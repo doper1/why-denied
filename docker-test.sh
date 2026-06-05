@@ -6,7 +6,7 @@
 # This is a thin, deterministic wrapper around `docker compose` so that the
 # local workflow is byte-for-byte identical to what CI runs:
 #
-#     make && bash tests/test_denied.sh
+#     make test
 #
 # (executed as an unprivileged user with passwordless sudo, per the images in
 # docker/).
@@ -75,7 +75,7 @@ for svc in "${services[@]}"; do
     "${COMPOSE[@]}" build "${svc}"
 
     echo
-    echo ">>> ${svc}: running 'make && bash tests/test_denied.sh'"
+    echo ">>> ${svc}: running 'make test'"
     if "${COMPOSE[@]}" run --rm "${svc}"; then
         results+=("PASS  ${svc}")
     else

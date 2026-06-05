@@ -16,8 +16,9 @@
  *      silently restore the original errno and return the original result.
  *   4. We are reentrancy-safe: a thread-local guard prevents infinite
  *      recursion should any function we call internally be itself intercepted.
- *   5. We only ever engage when STDERR is a TTY (an interactive session).
- *      Daemons, cron jobs and pipelines get a pure pass-through.
+ *   5. We engage for interactive sessions (STDERR is a TTY), when
+ *      WHY_DENIED_ENABLE is set, or when /etc/why-denied/service-mode exists.
+ *      Otherwise daemons, cron jobs and pipelines get a pure pass-through.
  *
  * The library keeps no mutable global state beyond the lazily-cached real
  * function pointers and a single load-time "disabled" flag, so it is safe to
@@ -1065,13 +1066,18 @@ int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group,
 /* -------------------------------------------------------------------------
  * Library load-time gate.
  *
- * We only ever engage for interactive human sessions, identified by STDERR
- * being a TTY. Non-interactive contexts (daemons, cron, build pipelines,
- * containers without a console) get a pure pass-through with zero overhead.
- * The explicit WHY_DENIED_DISABLE env var provides an escape hatch.
+ * Engage for interactive sessions (STDERR is a TTY), explicit opt-in via
+ * WHY_DENIED_ENABLE, or the /etc/why-denied/service-mode marker written by
+ * `why-denied enable global`. Non-interactive contexts without those signals
+ * get a pure pass-through. WHY_DENIED_DISABLE is the escape hatch and wins
+ * over every enable path.
  * ---------------------------------------------------------------------- */
+#define WD_SERVICE_MODE "/etc/why-denied/service-mode"
+
 __attribute__((constructor)) static void why_denied_init(void)
 {
+    int engage = 0;
+
     /* Stay completely inert in a secure-execution context (setuid/setgid, file
      * capabilities, AT_SECURE). Even though this library only ever reads, a
      * preload installed via /etc/ld.so.preload would otherwise run our probing
@@ -1079,8 +1085,16 @@ __attribute__((constructor)) static void why_denied_init(void)
      * getauxval(AT_SECURE) is the kernel's authoritative signal here. */
     if (getauxval(AT_SECURE) != 0)
         g_disabled = 1;
-    if (!isatty(STDERR_FILENO))
-        g_disabled = 1;
+
     if (getenv("WHY_DENIED_DISABLE") != NULL)
+        g_disabled = 1;
+    else if (getenv("WHY_DENIED_ENABLE") != NULL)
+        engage = 1;
+    else if (access(WD_SERVICE_MODE, F_OK) == 0)
+        engage = 1;
+    else if (isatty(STDERR_FILENO))
+        engage = 1;
+
+    if (!engage)
         g_disabled = 1;
 }

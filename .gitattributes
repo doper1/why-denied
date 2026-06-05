@@ -5,6 +5,8 @@
 
 # Files that MUST be LF regardless of platform.
 *.sh    text eol=lf
+bin/why-denied  text eol=lf
+man/*.1         text eol=lf
 *.c     text eol=lf
 *.h     text eol=lf
 *.yml   text eol=lf

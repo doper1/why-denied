@@ -1,0 +1,318 @@
+#!/bin/sh
+#
+# why-denied — CLI for the LD_PRELOAD permission-denied diagnostic shim.
+#
+# POSIX sh only. Override paths for development / tests:
+#   WHY_DENIED_SO       — path to why-denied.so (default: /usr/lib/why-denied/why-denied.so)
+#   WHY_DENIED_CLI_ROOT — prefix for /etc (default: empty → system /etc)
+
+set -eu
+
+SO_DEFAULT=/usr/lib/why-denied/why-denied.so
+SO="${WHY_DENIED_SO:-$SO_DEFAULT}"
+CLI_ROOT="${WHY_DENIED_CLI_ROOT:-}"
+ETC="${CLI_ROOT}/etc"
+SERVICE_DROPIN="${ETC}/systemd/system.conf.d/why-denied.conf"
+SERVICE_MODE="${ETC}/why-denied/service-mode"
+CLI="${WHY_DENIED_CLI:-/usr/bin/why-denied}"
+
+die() {
+    printf 'why-denied: %s\n' "$*" >&2
+    exit 1
+}
+
+need_root() {
+    # WHY_DENIED_CLI_ROOT redirects /etc writes for tests; skip the root check.
+    if [ -n "$CLI_ROOT" ]; then
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ]; then
+        die "this operation requires root (sudo)"
+    fi
+}
+
+so_installed() {
+    [ -e "$SO" ]
+}
+
+# Append our .so to LD_PRELOAD idempotently; result in LD_PRELOAD.
+preload_ld() {
+    case ":${LD_PRELOAD:-}:" in
+        *:"$SO":*) ;;
+        *)
+            if [ -n "${LD_PRELOAD:-}" ]; then
+                LD_PRELOAD="${LD_PRELOAD}:$SO"
+            else
+                LD_PRELOAD="$SO"
+            fi
+            ;;
+    esac
+    export LD_PRELOAD
+}
+
+# Strip our .so from LD_PRELOAD; unset when empty.
+strip_preload() {
+    if [ -z "${LD_PRELOAD:-}" ]; then
+        return 0
+    fi
+    new=""
+    old_ifs=$IFS
+    IFS=:
+    for entry in $LD_PRELOAD; do
+        [ -n "$entry" ] || continue
+        [ "$entry" = "$SO" ] && continue
+        if [ -n "$new" ]; then
+            new="$new:$entry"
+        else
+            new="$entry"
+        fi
+    done
+    IFS=$old_ifs
+    if [ -n "$new" ]; then
+        LD_PRELOAD="$new"
+        export LD_PRELOAD
+    else
+        unset LD_PRELOAD || true
+    fi
+}
+
+preload_in_env() {
+    case ":${LD_PRELOAD:-}:" in
+        *:"$SO":*) printf 'yes' ;;
+        *) printf 'no' ;;
+    esac
+}
+
+cmd_status() {
+    printf 'Library:     %s' "$SO"
+    if so_installed; then
+        printf ' (present)\n'
+    else
+        printf ' (missing)\n'
+    fi
+
+    if [ "$(preload_in_env)" = yes ]; then
+        printf 'This shell:  LD_PRELOAD includes why-denied → children preloaded\n'
+    else
+        printf 'This shell:  LD_PRELOAD does not include why-denied\n'
+    fi
+
+    if [ -t 2 ]; then
+        printf 'TTY:         yes (stderr is a terminal)\n'
+    else
+        printf 'TTY:         no (stderr is not a terminal)\n'
+    fi
+
+    if [ -n "${WHY_DENIED_ENABLE:-}" ]; then
+        printf 'Non-TTY:     WHY_DENIED_ENABLE is set → diagnostics enabled without TTY\n'
+    elif [ -f "$SERVICE_MODE" ]; then
+        printf 'Non-TTY:     global service-mode marker present → diagnostics enabled without TTY\n'
+    else
+        printf 'Non-TTY:     disabled (set WHY_DENIED_ENABLE=1 or enable global/service scope)\n'
+    fi
+
+    if [ -f "$SERVICE_DROPIN" ]; then
+        printf 'Service:     enabled (%s)\n' "$SERVICE_DROPIN"
+    else
+        printf 'Service:     disabled (no systemd drop-in)\n'
+    fi
+
+    if [ -f "$SERVICE_MODE" ]; then
+        printf 'Global:      enabled (%s)\n' "$SERVICE_MODE"
+    else
+        printf 'Global:      disabled (no service-mode marker)\n'
+    fi
+
+    if [ -n "${WHY_DENIED_DISABLE:-}" ]; then
+        printf 'Overrides:   WHY_DENIED_DISABLE is set → shim forced silent\n'
+    else
+        printf 'Overrides:   WHY_DENIED_DISABLE unset\n'
+    fi
+}
+
+cmd_run() {
+    if [ "$#" -eq 0 ]; then
+        die "run: missing command (usage: why-denied run [--] <cmd…>)"
+    fi
+    if [ "$1" = -- ]; then
+        shift
+    fi
+    if [ "$#" -eq 0 ]; then
+        die "run: missing command after --"
+    fi
+    if ! so_installed; then
+        die "shared library not found at $SO"
+    fi
+    preload_ld
+    if [ -z "${WHY_DENIED_DISABLE:-}" ]; then
+        export WHY_DENIED_ENABLE=1
+    fi
+    exec "$@"
+}
+
+cmd_try() {
+    if [ "$#" -ne 1 ]; then
+        die "try: usage: why-denied try <path>"
+    fi
+    cmd_run cat -- "$1"
+}
+
+cmd_shell() {
+    if ! so_installed; then
+        die "shared library not found at $SO"
+    fi
+    preload_ld
+    if [ -z "${WHY_DENIED_DISABLE:-}" ]; then
+        export WHY_DENIED_ENABLE=1
+    fi
+    export WHY_DENIED_REEXEC=1
+
+    if [ -n "${BASH:-}" ]; then
+        exec "$BASH" -l
+    fi
+    if [ -n "${ZSH_NAME:-}" ]; then
+        exec "$ZSH_NAME" -l
+    fi
+    if [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
+        exec "$SHELL" -l
+    fi
+    exec /bin/sh -l
+}
+
+session_enable_print() {
+    if ! so_installed; then
+        die "shared library not found at $SO"
+    fi
+    preload_ld
+    printf 'export LD_PRELOAD=%s\n' "$LD_PRELOAD"
+    printf 'export WHY_DENIED_ENABLE=1\n'
+    printf 'unset WHY_DENIED_DISABLE\n'
+}
+
+session_disable_print() {
+    strip_preload
+    if [ -n "${LD_PRELOAD:-}" ]; then
+        printf 'export LD_PRELOAD=%s\n' "$LD_PRELOAD"
+    else
+        printf 'unset LD_PRELOAD\n'
+    fi
+    printf 'unset WHY_DENIED_ENABLE\n'
+}
+
+write_service_dropin() {
+    need_root
+    install -d "$(dirname "$SERVICE_DROPIN")"
+    cat >"$SERVICE_DROPIN" <<EOF
+# Managed by why-denied. Disable with: why-denied disable service
+[Manager]
+DefaultEnvironment=LD_PRELOAD=$SO_DEFAULT
+DefaultEnvironment=WHY_DENIED_ENABLE=1
+EOF
+    chmod 0644 "$SERVICE_DROPIN"
+    printf 'Wrote %s\n' "$SERVICE_DROPIN" >&2
+    printf 'Run: systemctl daemon-reload\n' >&2
+    printf 'Then restart the units you want to instrument.\n' >&2
+}
+
+remove_service_dropin() {
+    need_root
+    if [ -f "$SERVICE_DROPIN" ]; then
+        rm -f "$SERVICE_DROPIN"
+        printf 'Removed %s\n' "$SERVICE_DROPIN" >&2
+        printf 'Run: systemctl daemon-reload\n' >&2
+    else
+        printf 'Service scope already disabled (no drop-in at %s).\n' "$SERVICE_DROPIN" >&2
+    fi
+}
+
+enable_global() {
+    need_root
+    install -d "$(dirname "$SERVICE_MODE")"
+    : >"$SERVICE_MODE"
+    chmod 0644 "$SERVICE_MODE"
+    printf 'Global service-mode enabled (%s).\n' "$SERVICE_MODE" >&2
+    printf 'Preloaded processes without a TTY will emit diagnostics when LD_PRELOAD is set.\n' >&2
+}
+
+disable_global() {
+    need_root
+    if [ -f "$SERVICE_MODE" ]; then
+        rm -f "$SERVICE_MODE"
+        printf 'Global service-mode disabled.\n' >&2
+    else
+        printf 'Global scope already disabled.\n' >&2
+    fi
+}
+
+cmd_enable() {
+    scope="${1:-session}"
+    case "$scope" in
+        session)
+            session_enable_print
+            printf '# Apply in your shell: eval "$(why-denied enable session)"\n' >&2
+            ;;
+        service) write_service_dropin ;;
+        global) enable_global ;;
+        *) die "unknown scope '$scope' (expected: session, service, global)" ;;
+    esac
+}
+
+cmd_disable() {
+    scope="${1:-session}"
+    case "$scope" in
+        session)
+            session_disable_print
+            printf '# Apply in your shell: eval "$(why-denied disable session)"\n' >&2
+            ;;
+        service) remove_service_dropin ;;
+        global) disable_global ;;
+        *) die "unknown scope '$scope' (expected: session, service, global)" ;;
+    esac
+}
+
+cmd_help() {
+    cat <<EOF
+usage: why-denied <command> [args]
+
+commands:
+  status                 show library path, preload state, and scope flags
+  run  [--] <cmd…>       run a command with why-denied preloaded
+  try  <path>            shorthand for: run cat -- <path>
+  shell                  start a preloaded interactive login shell
+  enable  [scope]        turn on (scope: session, service, global; default: session)
+  disable [scope]        turn off (same scopes)
+  help                   show this message (also: -h, --help)
+
+session scope prints shell exports — apply with:
+  eval "\$(why-denied enable session)"
+  eval "\$(why-denied disable session)"
+
+environment:
+  WHY_DENIED_SO          path to why-denied.so (dev override)
+  WHY_DENIED_DISABLE=1   force silence (wins over enable)
+  WHY_DENIED_ENABLE=1    engage on EACCES/EPERM even without a TTY
+
+See also: man why-denied
+EOF
+}
+
+main() {
+    if [ "$#" -eq 0 ]; then
+        cmd_help
+        exit 0
+    fi
+    cmd="$1"
+    shift
+    case "$cmd" in
+        status) cmd_status "$@" ;;
+        run) cmd_run "$@" ;;
+        try) cmd_try "$@" ;;
+        shell) cmd_shell "$@" ;;
+        enable) cmd_enable "$@" ;;
+        disable) cmd_disable "$@" ;;
+        help | -h | --help) cmd_help ;;
+        *) die "unknown command '$cmd' (try: why-denied help)" ;;
+    esac
+}
+
+main "$@"
