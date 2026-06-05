@@ -4,6 +4,13 @@ All notable changes to this project are documented here. This file is
 maintained automatically by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [0.4.0](https://github.com/doper1/why-denied/compare/why-denied-v0.3.0...why-denied-v0.4.0) (2026-06-05)
+
+
+### Features
+
+* CLI tool ([e508c50](https://github.com/doper1/why-denied/commit/e508c50ca251fb2b87255d443cdeb086ab5ae4f6))
+
 ## [0.3.0](https://github.com/doper1/why-denied/compare/why-denied-v0.2.0...why-denied-v0.3.0) (2026-05-31)
 
 
