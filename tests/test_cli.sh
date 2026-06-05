@@ -101,7 +101,9 @@ assert_exit() {
 # --------------------------------------------------------------------------
 for flag in help -h --help; do
     out="$(env WHY_DENIED_SO="${SO}" "${CLI}" "${flag}")"
-    assert_contains "${flag} prints usage" "usage: why-denied" "${out}"
+    assert_contains "${flag} prints Usage section" "Usage:" "${out}"
+    assert_contains "${flag} prints Examples section" "Examples:" "${out}"
+    assert_contains "${flag} prints try example" "why-denied try" "${out}"
 done
 
 # --------------------------------------------------------------------------
@@ -163,8 +165,8 @@ assert_contains "enable session exports WHY_DENIED_ENABLE" "export WHY_DENIED_EN
 en_bare_out="$(env WHY_DENIED_SO="${SO}" "${CLI}" enable 2>/dev/null)"
 assert_contains "bare enable still exports LD_PRELOAD" "export LD_PRELOAD=" "${en_bare_out}"
 en_bare_err="$(env WHY_DENIED_SO="${SO}" "${CLI}" enable 2>&1 >/dev/null || true)"
-assert_contains "bare enable explains scopes" "no scope given" "${en_bare_err}"
-assert_contains "bare enable clarifies service scope" "does NOT run why-denied as its own" "${en_bare_err}"
+assert_contains "bare enable explains scopes" "without picking a scope" "${en_bare_err}"
+assert_contains "bare enable clarifies service scope" "Does not run why-denied as its" "${en_bare_err}"
 assert_contains "bare enable shows service example" "why-denied enable service" "${en_bare_err}"
 
 dis_out="$(env WHY_DENIED_SO="${SO}" bash -c "eval \"\$(WHY_DENIED_CLI='${CLI}' WHY_DENIED_SO='${SO}' '${CLI}' enable session 2>/dev/null)\"; WHY_DENIED_CLI='${CLI}' WHY_DENIED_SO='${SO}' '${CLI}' disable session 2>/dev/null")"
@@ -181,7 +183,7 @@ dropin="${CLI_ROOT}/etc/systemd/system.conf.d/why-denied.conf"
 if [ -f "${dropin}" ]; then
     printf '%s[PASS]%s enable service writes drop-in\n' "${c_green}" "${c_reset}"
     PASS=$((PASS + 1))
-    assert_contains "enable service explains instrumentation" "does NOT start why-denied as its own service" "${svc_err}"
+    assert_contains "enable service explains instrumentation" "does not start why-denied as its own background service" "${svc_err}"
     assert_contains "enable service mentions journalctl" "journalctl" "${svc_err}"
     assert_contains "drop-in sets LD_PRELOAD" "DefaultEnvironment=LD_PRELOAD=" "$(cat "${dropin}")"
     assert_contains "drop-in sets WHY_DENIED_ENABLE" "WHY_DENIED_ENABLE=1" "$(cat "${dropin}")"
