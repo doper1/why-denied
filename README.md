@@ -88,7 +88,7 @@ flowchart TD
     D -- yes --> F{Interactive TTY? reentrancy clear?}
     F -- no --> E
     F -- yes --> G[analyze_denial - read-only probing]
-    G --> H[Print '[why-denied] ...' to STDERR]
+    G --> H["Print '[why-denied] ...' to STDERR"]
     H --> I[Restore original errno + return original value]
     E --> I
 ```
