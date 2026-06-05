@@ -38,8 +38,9 @@ Start a preloaded interactive login shell (bash, zsh, or \fB$SHELL\fR).
 .TP
 .B enable [\fIscope\fR]
 Turn diagnostics on. \fIscope\fR is \fBsession\fR (default), \fBservice\fR, or
-\fBglobal\fR. Session scope prints shell \fBexport\fR/\fBunset\fR lines for
-\fBeval\fR; service and global require root.
+\fBglobal\fR. Called without \fIscope\fR, prints a scope guide on standard error
+and defaults to \fBsession\fR. Session scope prints shell \fBexport\fR/\fBunset\fR
+lines for \fBeval\fR; \fBservice\fR and \fBglobal\fR require root.
 .TP
 .B disable [\fIscope\fR]
 Turn diagnostics off for the given \fIscope\fR.
@@ -58,10 +59,12 @@ eval "$(why-denied disable session)"
 .RE
 .TP
 .B service
-Write or remove \fB/etc/systemd/system.conf.d/why-denied.conf\fR, which sets
-manager-wide \fBDefaultEnvironment\fR for \fBLD_PRELOAD\fR and
-\fBWHY_DENIED_ENABLE\fR. Run \fBsystemctl daemon-reload\fR and restart affected
-units.
+Instrument \fBexisting\fR systemd units — this does \fBnot\fR run why-denied as
+its own background service. Writes or removes
+\fB/etc/systemd/system.conf.d/why-denied.conf\fR so restarted units preload the
+library; on \fBEACCES\fR/\fBEPERM\fR failures they emit extra \fB[why-denied]\fR
+lines to STDERR (visible in \fBjournalctl\fR). Run \fBsystemctl daemon-reload\fR
+and restart the units you want to instrument.
 .TP
 .B global
 Create or remove \fB/etc/why-denied/service-mode\fR. When the library is

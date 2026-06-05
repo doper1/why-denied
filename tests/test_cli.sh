@@ -160,6 +160,13 @@ en_out="$(env WHY_DENIED_SO="${SO}" "${CLI}" enable session 2>/dev/null)"
 assert_contains "enable session exports LD_PRELOAD" "export LD_PRELOAD=" "${en_out}"
 assert_contains "enable session exports WHY_DENIED_ENABLE" "export WHY_DENIED_ENABLE=1" "${en_out}"
 
+en_bare_out="$(env WHY_DENIED_SO="${SO}" "${CLI}" enable 2>/dev/null)"
+assert_contains "bare enable still exports LD_PRELOAD" "export LD_PRELOAD=" "${en_bare_out}"
+en_bare_err="$(env WHY_DENIED_SO="${SO}" "${CLI}" enable 2>&1 >/dev/null || true)"
+assert_contains "bare enable explains scopes" "no scope given" "${en_bare_err}"
+assert_contains "bare enable clarifies service scope" "does NOT run why-denied as its own" "${en_bare_err}"
+assert_contains "bare enable shows service example" "why-denied enable service" "${en_bare_err}"
+
 dis_out="$(env WHY_DENIED_SO="${SO}" bash -c "eval \"\$(WHY_DENIED_CLI='${CLI}' WHY_DENIED_SO='${SO}' '${CLI}' enable session 2>/dev/null)\"; WHY_DENIED_CLI='${CLI}' WHY_DENIED_SO='${SO}' '${CLI}' disable session 2>/dev/null")"
 assert_contains "disable session unsets WHY_DENIED_ENABLE" "unset WHY_DENIED_ENABLE" "${dis_out}"
 
@@ -169,11 +176,13 @@ assert_contains "disable session unsets WHY_DENIED_ENABLE" "unset WHY_DENIED_ENA
 CLI_ROOT="${WORK}/fakeroot"
 export WHY_DENIED_CLI_ROOT="${CLI_ROOT}"
 
-env WHY_DENIED_SO="${SO}" WHY_DENIED_CLI_ROOT="${CLI_ROOT}" "${CLI}" enable service >/dev/null
+svc_err="$(env WHY_DENIED_SO="${SO}" WHY_DENIED_CLI_ROOT="${CLI_ROOT}" "${CLI}" enable service 2>&1)"
 dropin="${CLI_ROOT}/etc/systemd/system.conf.d/why-denied.conf"
 if [ -f "${dropin}" ]; then
     printf '%s[PASS]%s enable service writes drop-in\n' "${c_green}" "${c_reset}"
     PASS=$((PASS + 1))
+    assert_contains "enable service explains instrumentation" "does NOT start why-denied as its own service" "${svc_err}"
+    assert_contains "enable service mentions journalctl" "journalctl" "${svc_err}"
     assert_contains "drop-in sets LD_PRELOAD" "DefaultEnvironment=LD_PRELOAD=" "$(cat "${dropin}")"
     assert_contains "drop-in sets WHY_DENIED_ENABLE" "WHY_DENIED_ENABLE=1" "$(cat "${dropin}")"
 else

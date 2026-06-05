@@ -380,8 +380,12 @@ man why-denied                 # full manual (after install)
 | Scope | Privilege | What changes |
 | ----- | --------- | ------------ |
 | `session` (default) | user | prints `export`/`unset` lines for `eval` in your shell |
-| `service` | root | writes/removes `/etc/systemd/system.conf.d/why-denied.conf` |
-| `global` | root | touches/removes `/etc/why-denied/service-mode` marker |
+| `service` | root | instruments **existing** systemd units — adds `[why-denied]` diagnostic lines to unit STDERR/journald when they hit `EACCES`/`EPERM`; does **not** run why-denied as its own daemon |
+| `global` | root | touches/removes `/etc/why-denied/service-mode` marker so preloaded non-TTY processes emit diagnostics |
+
+Running `why-denied enable` without a scope prints a scope guide on stderr and
+defaults to `session`. Prefer an explicit scope: `why-denied enable session`,
+`sudo why-denied enable service`, etc.
 
 Because a child process cannot modify its parent’s environment, **session scope
 prints shell snippets** rather than mutating your shell directly:
@@ -418,13 +422,17 @@ WHY_DENIED_SO=./why-denied.so why-denied shell
 why-denied status
 ```
 
-**Enable diagnostics for systemd services (troubleshooting window)**
+**Instrument systemd units (troubleshooting window)**
+
+This does not start why-denied as a background service. It configures restarted
+units to preload the library; permission-denied failures then get extra
+`[why-denied]` lines in that unit's log:
 
 ```bash
 sudo why-denied enable service
 sudo systemctl daemon-reload
 sudo systemctl restart myunit.service
-journalctl -u myunit.service -f    # [why-denied] lines appear on STDERR
+journalctl -u myunit.service -f    # [why-denied] lines on permission errors
 
 sudo why-denied disable service
 sudo systemctl daemon-reload

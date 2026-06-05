@@ -112,15 +112,16 @@ cmd_status() {
     fi
 
     if [ -f "$SERVICE_DROPIN" ]; then
-        printf 'Service:     enabled (%s)\n' "$SERVICE_DROPIN"
+        printf 'Systemd:     instrumentation ON — restarted units preload why-denied and may emit [why-denied] lines to journald\n'
+        printf '             (%s)\n' "$SERVICE_DROPIN"
     else
-        printf 'Service:     disabled (no systemd drop-in)\n'
+        printf 'Systemd:     instrumentation OFF (no manager drop-in; use: sudo why-denied enable service)\n'
     fi
 
     if [ -f "$SERVICE_MODE" ]; then
-        printf 'Global:      enabled (%s)\n' "$SERVICE_MODE"
+        printf 'Global:      non-TTY diagnostics ON when preloaded (%s)\n' "$SERVICE_MODE"
     else
-        printf 'Global:      disabled (no service-mode marker)\n'
+        printf 'Global:      non-TTY diagnostics OFF (use: sudo why-denied enable global)\n'
     fi
 
     if [ -n "${WHY_DENIED_DISABLE:-}" ]; then
@@ -199,29 +200,77 @@ session_disable_print() {
     printf 'unset WHY_DENIED_ENABLE\n'
 }
 
+print_enable_scopes_notice() {
+    cat >&2 <<'EOF'
+why-denied enable: no scope given — using 'session' (this shell only).
+
+Scopes (pick one explicitly next time):
+  session   Preload YOUR shell. Does not affect systemd or cron.
+            Apply:  eval "$(why-denied enable session)"
+
+  service   Instrument SYSTEMD UNITS — does NOT run why-denied as its own
+            daemon. Configures restarted units to preload why-denied.so; when
+            a unit hits "Permission denied", extra [why-denied] lines go to
+            that unit's STDERR (visible in journalctl).
+            Apply:  sudo why-denied enable service
+                    sudo systemctl daemon-reload
+                    sudo systemctl restart <unit>
+
+  global    Allow non-TTY diagnostics whenever LD_PRELOAD is already set
+            (marker file; pair with service scope or manual LD_PRELOAD).
+            Apply:  sudo why-denied enable global
+
+Examples:
+  why-denied enable session
+  sudo why-denied enable service
+  sudo why-denied enable global
+EOF
+}
+
 write_service_dropin() {
     need_root
     install -d "$(dirname "$SERVICE_DROPIN")"
     cat >"$SERVICE_DROPIN" <<EOF
 # Managed by why-denied. Disable with: why-denied disable service
+# Instruments systemd units — does NOT run why-denied as a background service.
 [Manager]
 DefaultEnvironment=LD_PRELOAD=$SO_DEFAULT
 DefaultEnvironment=WHY_DENIED_ENABLE=1
 EOF
     chmod 0644 "$SERVICE_DROPIN"
-    printf 'Wrote %s\n' "$SERVICE_DROPIN" >&2
-    printf 'Run: systemctl daemon-reload\n' >&2
-    printf 'Then restart the units you want to instrument.\n' >&2
+    cat >&2 <<EOF
+Systemd unit instrumentation enabled.
+
+This does NOT start why-denied as its own service. Existing systemd units are
+unchanged until restarted. After restart, those units preload why-denied.so; if
+they hit EACCES/EPERM, [why-denied] diagnostic lines are written to the unit's
+STDERR (see them with journalctl).
+
+Next steps:
+  sudo systemctl daemon-reload
+  sudo systemctl restart <unit>     # only units you want to instrument
+  journalctl -u <unit> -f         # watch for [why-denied] lines
+
+Wrote ${SERVICE_DROPIN}
+Turn off: sudo why-denied disable service && sudo systemctl daemon-reload
+EOF
 }
 
 remove_service_dropin() {
     need_root
     if [ -f "$SERVICE_DROPIN" ]; then
         rm -f "$SERVICE_DROPIN"
-        printf 'Removed %s\n' "$SERVICE_DROPIN" >&2
-        printf 'Run: systemctl daemon-reload\n' >&2
+        cat >&2 <<EOF
+Systemd unit instrumentation disabled.
+
+Newly started units will no longer inherit why-denied via this drop-in.
+Already-running units keep their current environment until restarted.
+
+Removed ${SERVICE_DROPIN}
+Next step: sudo systemctl daemon-reload
+EOF
     else
-        printf 'Service scope already disabled (no drop-in at %s).\n' "$SERVICE_DROPIN" >&2
+        printf 'Systemd instrumentation already off (no drop-in at %s).\n' "$SERVICE_DROPIN" >&2
     fi
 }
 
@@ -230,8 +279,15 @@ enable_global() {
     install -d "$(dirname "$SERVICE_MODE")"
     : >"$SERVICE_MODE"
     chmod 0644 "$SERVICE_MODE"
-    printf 'Global service-mode enabled (%s).\n' "$SERVICE_MODE" >&2
-    printf 'Preloaded processes without a TTY will emit diagnostics when LD_PRELOAD is set.\n' >&2
+    cat >&2 <<EOF
+Global non-TTY diagnostics enabled (${SERVICE_MODE}).
+
+This does NOT preload why-denied by itself. Processes that already have
+LD_PRELOAD set (e.g. via 'enable service' or cron) will emit [why-denied] lines
+even when STDERR is not a terminal (journald, cron mail, pipes).
+
+Turn off: sudo why-denied disable global
+EOF
 }
 
 disable_global() {
@@ -245,15 +301,24 @@ disable_global() {
 }
 
 cmd_enable() {
-    scope="${1:-session}"
+    if [ "$#" -eq 0 ]; then
+        print_enable_scopes_notice
+        scope=session
+    else
+        scope="$1"
+    fi
     case "$scope" in
         session)
             session_enable_print
-            printf '# Apply in your shell: eval "$(why-denied enable session)"\n' >&2
+            if [ "$#" -eq 0 ]; then
+                printf '\n# Applying session scope — run: eval "$(why-denied enable session)"\n' >&2
+            else
+                printf '# Apply in your shell: eval "$(why-denied enable session)"\n' >&2
+            fi
             ;;
         service) write_service_dropin ;;
         global) enable_global ;;
-        *) die "unknown scope '$scope' (expected: session, service, global)" ;;
+        *) die "unknown scope '$scope' (expected: session, service, global; try: why-denied enable)" ;;
     esac
 }
 
@@ -283,9 +348,19 @@ commands:
   disable [scope]        turn off (same scopes)
   help                   show this message (also: -h, --help)
 
-session scope prints shell exports — apply with:
+scopes for enable/disable:
+  session   preload your current shell (prints exports for eval)
+  service   instrument systemd units — adds [why-denied] lines to unit logs
+            (journald); (does NOT run why-denied as its own background service)
+  global    allow non-TTY diagnostics when LD_PRELOAD is already set
+
+session scope — apply with:
   eval "\$(why-denied enable session)"
   eval "\$(why-denied disable session)"
+
+service scope — typical troubleshooting flow:
+  sudo why-denied enable service && sudo systemctl daemon-reload
+  sudo systemctl restart myunit && journalctl -u myunit -f
 
 environment:
   WHY_DENIED_SO          path to why-denied.so (dev override)
