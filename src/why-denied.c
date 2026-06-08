@@ -845,7 +845,11 @@ static enum access_kind open_access_kind(int flags)
 int open(const char *pathname, int flags, ...)
 {
     mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
+    /* On Linux O_TMPFILE == (__O_TMPFILE | O_DIRECTORY), so a plain
+     * O_DIRECTORY open would match `flags & O_TMPFILE` and make us read a
+     * va_arg the caller never passed (undefined behaviour). Require ALL of
+     * O_TMPFILE's bits before consuming the mode argument. */
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
         va_list ap;
         va_start(ap, flags);
         mode =
@@ -864,7 +868,11 @@ int open(const char *pathname, int flags, ...)
 int openat(int dirfd, const char *pathname, int flags, ...)
 {
     mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
+    /* On Linux O_TMPFILE == (__O_TMPFILE | O_DIRECTORY), so a plain
+     * O_DIRECTORY open would match `flags & O_TMPFILE` and make us read a
+     * va_arg the caller never passed (undefined behaviour). Require ALL of
+     * O_TMPFILE's bits before consuming the mode argument. */
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
         va_list ap;
         va_start(ap, flags);
         mode = (mode_t)va_arg(ap, int);
@@ -893,7 +901,11 @@ int creat(const char *pathname, mode_t mode)
 int open64(const char *pathname, int flags, ...)
 {
     mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
+    /* On Linux O_TMPFILE == (__O_TMPFILE | O_DIRECTORY), so a plain
+     * O_DIRECTORY open would match `flags & O_TMPFILE` and make us read a
+     * va_arg the caller never passed (undefined behaviour). Require ALL of
+     * O_TMPFILE's bits before consuming the mode argument. */
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
         va_list ap;
         va_start(ap, flags);
         mode = (mode_t)va_arg(ap, int);
@@ -920,7 +932,11 @@ int open64(const char *pathname, int flags, ...)
 int openat64(int dirfd, const char *pathname, int flags, ...)
 {
     mode_t mode = 0;
-    if (flags & (O_CREAT | O_TMPFILE)) {
+    /* On Linux O_TMPFILE == (__O_TMPFILE | O_DIRECTORY), so a plain
+     * O_DIRECTORY open would match `flags & O_TMPFILE` and make us read a
+     * va_arg the caller never passed (undefined behaviour). Require ALL of
+     * O_TMPFILE's bits before consuming the mode argument. */
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
         va_list ap;
         va_start(ap, flags);
         mode = (mode_t)va_arg(ap, int);

@@ -26,7 +26,7 @@
 if [ -t 1 ] && [ -e /usr/lib/why-denied/why-denied.so ]; then
     # Append our path idempotently — the login re-exec below re-sources this
     # file, and we must not grow LD_PRELOAD with a duplicate entry each time.
-    case ":${LD_PRELOAD}:" in
+    case ":${LD_PRELOAD:-}:" in
         *:/usr/lib/why-denied/why-denied.so:*) ;;
         *) LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}/usr/lib/why-denied/why-denied.so" ;;
     esac
@@ -41,11 +41,11 @@ if [ -t 1 ] && [ -e /usr/lib/why-denied/why-denied.so ]; then
     # preloaded without re-exec'ing.
     case "$-" in
         *i*)
-            if [ -z "$WHY_DENIED_REEXEC" ] && [ -z "$WHY_DENIED_DISABLE" ]; then
+            if [ -z "${WHY_DENIED_REEXEC:-}" ] && [ -z "${WHY_DENIED_DISABLE:-}" ]; then
                 export WHY_DENIED_REEXEC=1
-                if [ -n "$BASH" ]; then
+                if [ -n "${BASH:-}" ]; then
                     exec "$BASH" -l
-                elif [ -n "$ZSH_NAME" ]; then
+                elif [ -n "${ZSH_NAME:-}" ]; then
                     exec "$ZSH_NAME" -l
                 fi
                 # Unknown shell: leave the guard set and fall through. Children

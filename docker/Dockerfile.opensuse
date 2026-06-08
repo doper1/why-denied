@@ -12,33 +12,50 @@
 #
 # TEST IMAGE ONLY — grants the `tester` user passwordless root via sudo so the
 # behavioural suite can forge foreign ownership. Do NOT use as a production base.
-FROM opensuse/leap:15
+# Pinned to a concrete Leap minor (instead of the floating :15) for reproducible
+# builds and to guarantee the repo URLs below resolve against a maintained
+# release; bump deliberately when adopting a newer Leap 15.x.
+FROM opensuse/leap:15.6
 
 # shadow -> useradd; util-linux -> `script` (pty driver); python3 -> pty
 # fallback; libacl-devel -> ACL headers; acl -> setfacl/getfacl. bash is in base.
 #
-# BUILD SPEED: the stock Leap image wires up several repos (update, non-oss,
-# and a Cisco openh264 repo). Refreshing all of them — especially the openh264
-# repo's GPG key import — is the slowest part of a cold build and is irrelevant
-# to our toolchain, which lives entirely in the OSS repo. So we disable every
-# repo, enable ONLY repo-oss, refresh just that one, and install with
-# --no-recommends, all in a single cached layer. (A test image does not need
-# the update channel; rebuild from a newer base to pick up patches.)
+# BUILD SPEED: a cold openSUSE build is dominated by metadata retrieval, and the
+# stock Leap image points its repos at download.opensuse.org — a MIRROR
+# REDIRECTOR that routinely hands out a slow or distant mirror, turning a
+# ~30s refresh into several minutes (and sometimes appearing to hang on the
+# repo's GPG-key import). The fixes, in order of impact:
+#
+#   1. Rewrite the repo URLs to cdn.opensuse.org — a single fast CDN endpoint
+#      instead of the redirector — BEFORE any refresh. This is the dominant win.
+#   2. Disable every repo and enable ONLY repo-oss (our entire toolchain lives
+#      there), skipping the update/non-oss/openh264 repos a test image does not
+#      need — so only one small repo's metadata is fetched.
+#   3. Fold the metadata refresh into a single `install` pass (install
+#      auto-refreshes the enabled repo and imports the signing key), instead of
+#      a separate `refresh` followed by `install` that downloads twice.
+#   4. Download packages with libzypp's STABLE segmented downloader
+#      (ZYPP_MULTICURL=1) plus a raised concurrent-connection limit, so each
+#      file is fetched over several parallel connections instead of one stream
+#      that a slow/throttled mirror can starve to a few KiB/s. (We deliberately
+#      do NOT set the experimental ZYPP_CURL2, which can stall on Leap 15.x.)
 #
 # The BuildKit cache mount on /var/cache/zypp persists the downloaded repo
 # metadata and .rpm packages across builds WITHOUT baking them into the image
 # layer — so a rebuild (or a cache-invalidated CI run) reuses the refreshed
 # metadata + cached rpms instead of re-fetching them, while the image stays
-# small. Because the cache mount lives outside the layer, the old trailing
-# `zypper clean --all` is intentionally dropped: cleaning would only purge the
-# out-of-layer cache and defeat the speedup, and it never affected layer size
-# here anyway.
-RUN --mount=type=cache,target=/var/cache/zypp,sharing=locked \
+# small. `sharing=shared` (not `locked`) lets concurrent builds read the cache
+# without serializing behind a single lock. Because the cache mount lives
+# outside the layer, the old trailing `zypper clean --all` is intentionally
+# dropped: cleaning would only purge the out-of-layer cache and defeat the
+# speedup, and it never affected layer size here anyway.
+RUN --mount=type=cache,target=/var/cache/zypp,sharing=shared \
     set -eux; \
+    sed -i 's|download.opensuse.org|cdn.opensuse.org|g' /etc/zypp/repos.d/*.repo; \
+    echo 'download.max_concurrent_connections = 10' >> /etc/zypp/zypp.conf; \
     zypper --non-interactive modifyrepo --all --disable; \
     zypper --non-interactive modifyrepo --enable repo-oss; \
-    zypper --non-interactive --gpg-auto-import-keys refresh repo-oss; \
-    zypper --non-interactive install --no-recommends \
+    ZYPP_MULTICURL=1 zypper --non-interactive --gpg-auto-import-keys install --no-recommends \
         gcc \
         make \
         libacl-devel \

@@ -221,6 +221,41 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# help/status output channels: help goes to stdout, unknown commands to stderr
+# --------------------------------------------------------------------------
+unknown_err="$(env WHY_DENIED_SO="${SO}" "${CLI}" frobnicate 2>&1 >/dev/null || true)"
+assert_contains "unknown command explains itself on stderr" "unknown command" "${unknown_err}"
+
+# --------------------------------------------------------------------------
+# Error paths: every misuse must exit non-zero (1). Inner output is suppressed
+# so only the [PASS]/[FAIL] lines surface.
+# --------------------------------------------------------------------------
+assert_exit "run with no command exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${SO}' '${CLI}' run >/dev/null 2>&1"
+assert_exit "run -- with nothing after exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${SO}' '${CLI}' run -- >/dev/null 2>&1"
+assert_exit "run with missing library exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${WORK}/nope.so' '${CLI}' run cat /etc/hostname >/dev/null 2>&1"
+assert_exit "try with no path exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${SO}' '${CLI}' try >/dev/null 2>&1"
+assert_exit "try with too many args exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${SO}' '${CLI}' try a b >/dev/null 2>&1"
+assert_exit "unknown command exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${SO}' '${CLI}' frobnicate >/dev/null 2>&1"
+assert_exit "unknown enable scope exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${SO}' WHY_DENIED_CLI_ROOT='${WORK}/scoperoot' '${CLI}' enable bogus >/dev/null 2>&1"
+assert_exit "unknown disable scope exits 1" 1 \
+    sh -c "WHY_DENIED_SO='${SO}' WHY_DENIED_CLI_ROOT='${WORK}/scoperoot' '${CLI}' disable bogus >/dev/null 2>&1"
+
+# --------------------------------------------------------------------------
+# no-argument invocation prints help and exits 0
+# --------------------------------------------------------------------------
+assert_exit "no-argument invocation exits 0" 0 \
+    sh -c "WHY_DENIED_SO='${SO}' '${CLI}' >/dev/null 2>&1"
+noarg_out="$(env WHY_DENIED_SO="${SO}" "${CLI}")"
+assert_contains "no-argument invocation prints usage" "Usage:" "${noarg_out}"
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 echo

@@ -52,6 +52,14 @@ install: $(TARGET)
 	install -m 0644 $(MANPAGE) $(DESTDIR)$(MANDIR)/man1/why-denied.1
 	install -d $(DESTDIR)$(PROFILED)
 	install -m 0644 profile.d/why-denied.sh $(DESTDIR)$(PROFILED)/why-denied.sh
+	# The CLI and profile.d hook ship with the default /usr/lib/why-denied
+	# library path baked in. When LIBDIR differs (non-default PREFIX) rewrite
+	# the installed copies so the shim is actually found and activates. A `|`
+	# sed delimiter avoids clashing with the slashes in the path; for the
+	# default LIBDIR this substitution is a harmless no-op.
+	sed -i 's|/usr/lib/why-denied/why-denied.so|$(LIBDIR)/$(TARGET)|g' \
+		$(DESTDIR)$(BINDIR)/why-denied \
+		$(DESTDIR)$(PROFILED)/why-denied.sh
 	@echo "Installed. Open a new interactive shell, run 'why-denied status', or 'source $(PROFILED)/why-denied.sh'."
 
 uninstall:

@@ -96,6 +96,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# --------------------------------------------------------------------------
+# Compile the syscall probe (tests/syscall_probe.c). It reaches wrapper
+# variants no stock command exercises (open(O_RDWR), openat, creat, fchmod,
+# fchown, O_DIRECTORY). If no C compiler is available the probe-based cases
+# self-skip rather than fail.
+# --------------------------------------------------------------------------
+PROBE=""
+PROBE_CC=""
+for _cc in "${CC:-}" cc gcc clang; do
+    [ -n "${_cc}" ] || continue
+    if command -v "${_cc}" >/dev/null 2>&1; then
+        PROBE_CC="${_cc}"
+        break
+    fi
+done
+if [ -n "${PROBE_CC}" ]; then
+    if "${PROBE_CC}" -O2 -o "${WORK}/syscall_probe" \
+        "${ROOT}/tests/syscall_probe.c" 2>/dev/null; then
+        PROBE="${WORK}/syscall_probe"
+    fi
+fi
+
 # Run a command string inside a pty (so STDERR is a TTY) with why-denied
 # preloaded, and echo the combined output.
 run_under_tty() {
@@ -711,6 +733,143 @@ if require_nonroot "WHY_DENIED_DISABLE wins over ENABLE"; then
     out="$(WHY_DENIED_ENABLE=1 WHY_DENIED_DISABLE=1 LD_PRELOAD="${SO}" cat "${nf}" 2>&1 || true)"
     assert_not_contains "WHY_DENIED_DISABLE wins over ENABLE" "[why-denied]" "${out}"
     chmod 600 "${nf}"
+fi
+
+# ==========================================================================
+# WRAPPER COVERAGE — exercise the intercepted symbols that no stock coreutil
+# reaches, using the compiled syscall probe. These cover the AK_RDWR access
+# kind, the *at() resolution path, the dedicated creat() wrapper, the fd-based
+# (fchmod/fchown) inspection path, and the O_TMPFILE/O_DIRECTORY mask fix.
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Case 17: O_RDWR open on a write-only file reports the missing READ bit
+#   AK_RDWR requires BOTH read and write; a 0200 (owner write-only) file we own
+#   denies the O_RDWR open and must be diagnosed as a missing READ, not a write.
+# --------------------------------------------------------------------------
+if require_nonroot "O_RDWR open reports missing read bit"; then
+    if [ -n "${PROBE}" ]; then
+        f="${WORK}/rdwr_noread.bin"
+        echo data > "${f}"
+        chmod 0200 "${f}" # write-only: O_RDWR needs read too
+        out="$(run_under_tty "'${PROBE}' open_rdwr '${f}'")"
+        assert_contains "O_RDWR missing read bit" "Missing owner read permission" "${out}"
+        chmod 0600 "${f}"
+    else
+        skip "O_RDWR missing read bit (no C compiler to build the probe)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 18: O_RDWR open on a read-only file reports the missing WRITE bit
+#   The complementary AK_RDWR sub-branch: 0400 (owner read-only) has the read
+#   bit, so why-denied must report the missing WRITE rather than read.
+# --------------------------------------------------------------------------
+if require_nonroot "O_RDWR open reports missing write bit"; then
+    if [ -n "${PROBE}" ]; then
+        f="${WORK}/rdwr_nowrite.bin"
+        echo data > "${f}"
+        chmod 0400 "${f}" # read-only: O_RDWR needs write too
+        out="$(run_under_tty "'${PROBE}' open_rdwr '${f}'")"
+        assert_contains "O_RDWR missing write bit" "Missing owner write permission" "${out}"
+        chmod 0600 "${f}"
+    else
+        skip "O_RDWR missing write bit (no C compiler to build the probe)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 19: openat() with a real dirfd resolves the path and diagnoses it
+#   Exercises INSPECT_AT + resolve_at(): the leaf is unreadable (000) while the
+#   directory is searchable, so the denial is reported against the joined path.
+# --------------------------------------------------------------------------
+if require_nonroot "openat dirfd-relative denial"; then
+    if [ -n "${PROBE}" ]; then
+        d="${WORK}/openat_dir"
+        mkdir -p "${d}"
+        echo hi > "${d}/inner.txt"
+        chmod 000 "${d}/inner.txt"
+        out="$(run_under_tty "'${PROBE}' openat_rdonly '${d}' inner.txt")"
+        assert_contains "openat dirfd-relative denial" "Missing owner read permission" "${out}"
+        chmod 600 "${d}/inner.txt"
+    else
+        skip "openat dirfd-relative denial (no C compiler to build the probe)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 20: creat() into a read-only directory is routed to the parent check
+#   Covers the dedicated creat() wrapper (AK_WRITE) and the ENOENT→parent path.
+# --------------------------------------------------------------------------
+if require_nonroot "creat in read-only directory"; then
+    if [ -n "${PROBE}" ]; then
+        rd="${WORK}/creat_rodir"
+        mkdir -p "${rd}"
+        chmod 0555 "${rd}" # r-x: searchable but not writable
+        out="$(run_under_tty "'${PROBE}' creat '${rd}/new.bin'")"
+        assert_contains "creat in read-only directory" "write into directory" "${out}"
+        chmod 0755 "${rd}"
+    else
+        skip "creat in read-only directory (no C compiler to build the probe)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 21: fchown() give-away via an fd reaches the AK_CHOWN diagnosis
+#   We OWN the file (no sudo needed) but cannot hand it to another uid; the fd
+#   path (INSPECT_FD + path_from_fd) must surface the chown remediation.
+# --------------------------------------------------------------------------
+if require_nonroot "fchown give-away via fd"; then
+    if [ -n "${PROBE}" ]; then
+        cf="${WORK}/fchown_fd.bin"
+        echo mine > "${cf}" # owned by the current (non-root) user
+        target_uid=65534
+        [ "$(id -u)" -eq "${target_uid}" ] && target_uid=1
+        out="$(run_under_tty "'${PROBE}' fchown '${cf}' ${target_uid}")"
+        assert_contains "fchown give-away via fd" "requires root or CAP_CHOWN" "${out}"
+    else
+        skip "fchown give-away via fd (no C compiler to build the probe)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 22: fchmod() by a non-owner via an fd reaches the AK_CHMOD diagnosis
+#   A root-owned 0644 file: we may open it for reading (other-read), but the
+#   subsequent fchmod fails EPERM and must be diagnosed through the fd path.
+# --------------------------------------------------------------------------
+if require_nonroot "fchmod by non-owner via fd"; then
+    if [ -n "${PROBE}" ] && have_sudo; then
+        rf="${WORK}/fchmod_fd.bin"
+        if sudo -n sh -c "echo root-owned > '${rf}'" 2>/dev/null \
+            && sudo -n chmod 0644 "${rf}" 2>/dev/null \
+            && [ "$(stat -c '%U' "${rf}" 2>/dev/null)" = "root" ]; then
+            out="$(run_under_tty "'${PROBE}' fchmod '${rf}'")"
+            assert_contains "fchmod by non-owner via fd" "You are not the owner" "${out}"
+        else
+            skip "fchmod by non-owner via fd (could not create root-owned fixture)"
+        fi
+        sudo -n rm -f "${rf}" 2>/dev/null || true
+    elif [ -z "${PROBE}" ]; then
+        skip "fchmod by non-owner via fd (no C compiler to build the probe)"
+    else
+        skip "fchmod by non-owner via fd (needs passwordless sudo)"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# Case 23: opening a DIRECTORY with O_DIRECTORY succeeds and stays silent
+#   Regression for the O_TMPFILE mask: O_TMPFILE == (__O_TMPFILE | O_DIRECTORY),
+#   so a plain O_DIRECTORY open must NOT be mistaken for a creation call. The
+#   open succeeds (PROBE_OK) and why-denied emits nothing.
+# --------------------------------------------------------------------------
+if [ -n "${PROBE}" ]; then
+    dd="${WORK}/dir_open_ok"
+    mkdir -p "${dd}"
+    out="$(run_under_tty "'${PROBE}' open_dir '${dd}'")"
+    assert_contains "O_DIRECTORY open succeeds" "PROBE_OK" "${out}"
+    assert_not_contains "O_DIRECTORY open stays silent" "[why-denied]" "${out}"
+else
+    skip "O_DIRECTORY open regression (no C compiler to build the probe)"
 fi
 
 # ==========================================================================
